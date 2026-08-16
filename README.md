@@ -45,8 +45,9 @@ https://proxy.example.com/http://origin.example.com:8096/path
 先查看脚本，再执行：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/install.sh -o install-refract.sh
-less install-refract.sh)
+curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/install.sh -o install-refract.sh
+less install-refract.sh
+sudo sh install-refract.sh
 ```
 
 脚本会询问域名和默认上游，自动生成 256 位签名密钥与管理会话密钥，启动服务并等待健康检查通过。首次部署完成后访问：
@@ -92,7 +93,21 @@ curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/insta
 > [!WARNING]
 > `--public-proxy` 会把服务变成公开的公网 HTTP 代理，可能被用于盗链、扫描或消耗带宽。私网目标仍然默认禁止，但公网部署应结合面板黑名单、并发限制和上游防火墙持续观察。
 
-重复执行同一条安装命令即可升级。脚本会执行快进更新并重建容器，现有 `.env`、SQLite 数据和证书都会保留。
+### 一键更新
+
+默认安装目录 `/opt/refract`：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/install.sh | sudo sh
+```
+
+自定义安装目录：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/install.sh | sudo sh -s -- --install-dir /你的安装目录
+```
+
+脚本会执行快进更新并重建容器，现有 `.env`、SQLite 数据、面板账号和证书都会保留。
 
 ## 手动部署
 
