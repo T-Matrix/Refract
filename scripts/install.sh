@@ -4,6 +4,7 @@ set -eu
 REPO_URL="${REFRACT_REPO_URL:-https://github.com/T-Matrix/Refract.git}"
 BRANCH="${REFRACT_BRANCH:-main}"
 INSTALL_DIR="${REFRACT_INSTALL_DIR:-/opt/refract}"
+COMPOSE_VERSION="${REFRACT_COMPOSE_VERSION:-v5.4.0}"
 
 domain="${REFRACT_DOMAIN:-}"
 upstream="${REFRACT_UPSTREAM:-}"
@@ -32,7 +33,7 @@ Refract 一键部署脚本
   -h, --help               显示帮助
 
 环境变量：
-  REFRACT_REPO_URL、REFRACT_BRANCH、REFRACT_INSTALL_DIR
+  REFRACT_REPO_URL、REFRACT_BRANCH、REFRACT_INSTALL_DIR、REFRACT_COMPOSE_VERSION
   REFRACT_DOMAIN、REFRACT_UPSTREAM、REFRACT_ALLOWED_UPSTREAMS
   REFRACT_ADMIN_USER、REFRACT_PUBLIC_PROXY、REFRACT_ALLOW_PRIVATE_TARGETS
 
@@ -158,10 +159,39 @@ install_packages() {
 
 install_docker() {
     say "安装 Docker Engine 与 Compose 插件"
+    if command -v apk >/dev/null 2>&1; then
+        apk add --no-cache docker docker-cli-compose
+        return
+    fi
     installer="$(mktemp)"
     curl -fsSL https://get.docker.com -o "$installer"
     sh "$installer"
     rm -f "$installer"
+}
+
+install_compose_plugin() {
+    arch="$(uname -m)"
+    case "$arch" in
+        x86_64|amd64) compose_arch="x86_64" ;;
+        aarch64|arm64) compose_arch="aarch64" ;;
+        *) fail "暂不支持当前 CPU 架构的 Compose 自动安装：$arch" ;;
+    esac
+
+    asset="docker-compose-linux-$compose_arch"
+    base_url="https://github.com/docker/compose/releases/download/$COMPOSE_VERSION"
+    plugin_tmp="$(mktemp)"
+    checksum_tmp="$(mktemp)"
+
+    say "安装 Docker Compose $COMPOSE_VERSION"
+    curl -fsSL "$base_url/$asset" -o "$plugin_tmp"
+    curl -fsSL "$base_url/$asset.sha256" -o "$checksum_tmp"
+    expected="$(awk '{print $1}' "$checksum_tmp")"
+    actual="$(openssl dgst -sha256 "$plugin_tmp" | awk '{print $NF}')"
+    [ -n "$expected" ] && [ "$actual" = "$expected" ] || fail "Docker Compose 校验失败"
+
+    mkdir -p /usr/local/lib/docker/cli-plugins
+    install -m 0755 "$plugin_tmp" /usr/local/lib/docker/cli-plugins/docker-compose
+    rm -f "$plugin_tmp" "$checksum_tmp"
 }
 
 random_hex() {
@@ -201,8 +231,15 @@ if ! command -v docker >/dev/null 2>&1; then
     install_docker
 fi
 
+if ! docker compose version >/dev/null 2>&1; then
+    install_compose_plugin
+fi
+
 if command -v systemctl >/dev/null 2>&1; then
     systemctl enable --now docker >/dev/null 2>&1 || true
+elif command -v rc-service >/dev/null 2>&1; then
+    rc-update add docker default >/dev/null 2>&1 || true
+    rc-service docker start >/dev/null 2>&1 || true
 fi
 
 docker info >/dev/null 2>&1 || fail "Docker 守护进程不可用，请先启动 Docker"

@@ -2,6 +2,14 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的结构，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.7.2] - 2026-08-16
+
+### 改进
+
+- 一键部署脚本支持 Alpine Linux 与 OpenRC 服务启动。
+- 已安装 Docker 但缺少 Compose 时，自动下载官方 Compose 插件并校验 SHA-256。
+- GitHub Actions 升级到当前 Node.js 24 运行时版本，消除弃用告警。
+
 ## [1.7.1] - 2026-08-16
 
 ### 新增
@@ -21,4 +29,5 @@
 - 修复客户端中断流式响应后流量未落库，导致概览及后端统计刷新回弹的问题。
 - 修复概览时间范围切换、主要后端流量和实时下行刷新不一致的问题。
 
+[1.7.2]: https://github.com/T-Matrix/Refract/releases/tag/v1.7.2
 [1.7.1]: https://github.com/T-Matrix/Refract/releases/tag/v1.7.1
