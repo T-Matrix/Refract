@@ -406,8 +406,8 @@ ADMIN_BACKUP_DIR=/data/backups
 GEOIP_LOOKUP_URL=https://ipwho.is/{ip}?fields=success,ip,country,country_code,region,latitude,longitude
 GEOIP_LOOKUP_TIMEOUT=8s
 GEOIP_LOOKUP_INTERVAL=1100ms
-MAX_CONCURRENT_REQUESTS=64
-MAX_CONCURRENT_PER_IP=12
+MAX_CONCURRENT_REQUESTS=256
+MAX_CONCURRENT_PER_IP=64
 EOF
     chmod 600 "$env_file"
 fi

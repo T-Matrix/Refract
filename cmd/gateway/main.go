@@ -14,6 +14,12 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "_self-update-helper" {
+		if err := gateway.RunSelfUpdateHelper(os.Args[2:]); err != nil {
+			log.Fatalf("self-update failed: %v", err)
+		}
+		return
+	}
 	cfg, err := gateway.LoadConfig()
 	if err != nil {
 		log.Fatalf("configuration error: %v", err)

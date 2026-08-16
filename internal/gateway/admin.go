@@ -222,7 +222,9 @@ func (a *adminServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 			a.methodNotAllowed(w, http.MethodGet)
 			return
 		}
-		a.writeJSON(w, http.StatusOK, map[string]any{"username": session.Username, "expires": session.Expires})
+		a.writeJSON(w, http.StatusOK, map[string]any{"username": session.Username, "expires": session.Expires, "version": normalizedVersion(Version)})
+	case "/_admin/api/update":
+		a.handleUpdate(w, r, session)
 	case "/_admin/api/dashboard":
 		if r.Method != http.MethodGet {
 			a.methodNotAllowed(w, http.MethodGet)

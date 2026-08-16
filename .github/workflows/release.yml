@@ -47,9 +47,14 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p dist
+          version="$(sed -n 's/^var Version = "\([^"]*\)"/\1/p' internal/gateway/update.go)"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "v${version}" != "${GITHUB_REF_NAME}" ]]; then
+            echo "Version ${version} does not match tag ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
           CGO_ENABLED=0 GOOS=linux go build \
             -trimpath \
-            -ldflags="-s -w" \
+            -ldflags="-s -w -X github.com/T-Matrix/Refract/internal/gateway.Version=${version}" \
             -o "dist/refract-linux-${GOARCH}" \
             ./cmd/gateway
 

@@ -31,6 +31,7 @@ type Gateway struct {
 	turnstile   *turnstileManager
 	backups     *backupManager
 	geo         *geoTracker
+	updates     *updateManager
 	limiter     *requestLimiter
 	meter       *rateMeter
 	connections *connectionTracker
@@ -50,10 +51,10 @@ func New(cfg Config) *Gateway {
 
 func NewChecked(cfg Config) (*Gateway, error) {
 	if cfg.MaxConcurrent <= 0 {
-		cfg.MaxConcurrent = 64
+		cfg.MaxConcurrent = 256
 	}
 	if cfg.MaxConcurrentPerIP <= 0 || cfg.MaxConcurrentPerIP > cfg.MaxConcurrent {
-		cfg.MaxConcurrentPerIP = min(12, cfg.MaxConcurrent)
+		cfg.MaxConcurrentPerIP = min(64, cfg.MaxConcurrent)
 	}
 	gateway := &Gateway{
 		cfg:         cfg,
@@ -155,6 +156,7 @@ func NewChecked(cfg Config) (*Gateway, error) {
 			return nil, fmt.Errorf("initialize backup manager: %w", err)
 		}
 		gateway.backups = backups
+		gateway.updates = newUpdateManager(cfg)
 		admin, err := newAdminServer(gateway, store, cfg)
 		if err != nil {
 			backups.Close()
@@ -201,7 +203,7 @@ func (g *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if request.URL.Path == "/_gateway/health" {
-		writeJSON(writer, http.StatusOK, map[string]any{"ok": true})
+		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "version": normalizedVersion(Version)})
 		return
 	}
 	if request.Method == http.MethodOptions {

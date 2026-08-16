@@ -29,6 +29,7 @@ https://proxy.example.com/http://origin.example.com:8096/path
 - 24 小时、7 天、30 天、90 天统计与 CSV 导出。
 - 可关闭的域名黑名单 / 白名单模式，规则只匹配域名及子域名。
 - Telegram 日报、Cloudflare Turnstile、管理审计与 SQLite 备份恢复。
+- 侧栏自动检查 GitHub Release；新版本显示红点，原生 systemd 部署可在面板校验、更新并失败回滚。
 - Docker Compose + Caddy 自动申请和续期 HTTPS 证书。
 
 ## 一键部署
@@ -109,6 +110,8 @@ curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/insta
 
 脚本会执行快进更新并重建容器，现有 `.env`、SQLite 数据、面板账号和证书都会保留。
 旧版 `/opt/vps-url-gateway` systemd 部署也会被自动识别，脚本将校验最新 Release、备份当前二进制并原地更新；健康检查失败时自动回滚。
+
+原生 systemd 部署升级到支持面板更新的版本后，侧栏左下角会自动检查官方 GitHub Release。有新版本时版本号旁显示红点，点击版本区域并确认即可完成 SHA256 校验、原子替换、服务重启和健康检查；更新失败会自动恢复旧二进制。Docker Compose 部署不向容器挂载宿主机 Docker 控制权限，因此仍使用上面的一键更新命令。
 
 ## 手动部署
 
@@ -201,8 +204,8 @@ https://proxy.example.com/http://emby.example.com:8096
 | `ADMIN_ENABLED` | `false` | 启用管理面板和统计持久化 |
 | `ADMIN_SESSION_TTL` | `12h` | 管理会话有效期 |
 | `GEOIP_LOOKUP_URL` | `ipwho.is` | 必须是含 `{ip}` 的 HTTPS 查询地址，留空关闭定位 |
-| `MAX_CONCURRENT_REQUESTS` | `64` | 全局并发请求限制 |
-| `MAX_CONCURRENT_PER_IP` | `12` | 单客户端 IP 并发限制 |
+| `MAX_CONCURRENT_REQUESTS` | `256` | 全局并发请求限制 |
+| `MAX_CONCURRENT_PER_IP` | `64` | 单客户端 IP 并发限制 |
 
 完整配置和注释参见 [.env.example](.env.example)。Turnstile 与 Telegram 密钥由面板保存，不写入环境变量；服务端使用从管理会话密钥派生的 AES-256-GCM 密钥加密。
 

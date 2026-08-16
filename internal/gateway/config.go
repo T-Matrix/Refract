@@ -69,8 +69,8 @@ func LoadConfig() (Config, error) {
 		GeoIPLookupURL:      envString("GEOIP_LOOKUP_URL", "https://ipwho.is/{ip}?fields=success,ip,country,country_code,region,latitude,longitude"),
 		GeoIPLookupTimeout:  envDuration("GEOIP_LOOKUP_TIMEOUT", 8*time.Second),
 		GeoIPLookupInterval: envDuration("GEOIP_LOOKUP_INTERVAL", 1100*time.Millisecond),
-		MaxConcurrent:       envInt("MAX_CONCURRENT_REQUESTS", 64),
-		MaxConcurrentPerIP:  envInt("MAX_CONCURRENT_PER_IP", 12),
+		MaxConcurrent:       envInt("MAX_CONCURRENT_REQUESTS", 256),
+		MaxConcurrentPerIP:  envInt("MAX_CONCURRENT_PER_IP", 64),
 	}
 
 	var err error

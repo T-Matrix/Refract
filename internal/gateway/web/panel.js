@@ -6,7 +6,7 @@
     view: 'overview', dashboardTimer: null, dashboardPromise: null, liveTimer: null, liveRefreshing: false,
     policy: null, telegram: null, turnstile: null, turnstileWidget: null, turnstileToken: '',
     report: null, reportPeriod: '24h', reportLiveChart: null, reportTrendChart: null, reportRegionChart: null,
-    liveSeries: [], backups: null
+    liveSeries: [], backups: null, update: null
   };
   let confirmResolver = null;
   const viewMeta = {
@@ -79,6 +79,86 @@
   }
 
   function emptyList(container, text) { container.replaceChildren(el('p', 'empty-state', text)); }
+
+  function renderUpdateStatus(status) {
+    if (!status) return;
+    state.update = status;
+    const button = document.getElementById('update-button');
+    const dot = document.getElementById('update-dot');
+    const current = String(status.current_version || '');
+    document.getElementById('current-version').textContent = current ? `Version ${current}` : 'Version';
+    const available = Boolean(status.update_available);
+    const updating = Boolean(status.updating);
+    dot.hidden = !available || updating;
+    button.classList.toggle('available', available && !updating);
+    button.classList.toggle('updating', updating);
+    button.disabled = !available || updating;
+    if (updating) {
+      button.title = `正在更新到 ${status.latest_version}`;
+      button.setAttribute('aria-label', button.title);
+    } else if (available && status.auto_update_supported) {
+      button.title = `发现 Refract ${status.latest_version}，点击更新`;
+      button.setAttribute('aria-label', button.title);
+    } else if (available) {
+      button.title = `发现 Refract ${status.latest_version}，当前部署不支持面板更新`;
+      button.setAttribute('aria-label', button.title);
+    } else {
+      button.title = 'Refract 已是最新版本';
+      button.setAttribute('aria-label', button.title);
+    }
+  }
+
+  async function refreshUpdateStatus(force = false) {
+    const status = await api(`/_admin/api/update${force ? '?force=1' : ''}`);
+    renderUpdateStatus(status);
+    return status;
+  }
+
+  async function waitForUpdatedVersion(version) {
+    const deadline = Date.now() + 90000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1500));
+      try {
+        const response = await fetch('/_admin/api/session', { credentials: 'same-origin', cache: 'no-store' });
+        if (!response.ok) continue;
+        const session = await response.json();
+        if (session.version === version) {
+          const view = state.view || 'overview';
+          window.location.replace(`/panel?updated=${encodeURIComponent(version)}#${encodeURIComponent(view)}`);
+          return;
+        }
+      } catch (failure) { /* The service is restarting. */ }
+    }
+    toast('更新任务仍在执行，请稍后刷新页面');
+  }
+
+  async function startPanelUpdate() {
+    const status = state.update;
+    if (!status?.update_available) return;
+    if (!status.auto_update_supported) {
+      toast('当前部署方式暂不支持面板自动更新');
+      return;
+    }
+    const confirmed = await confirmAction({
+      title: `更新到 Refract ${status.latest_version}`,
+      message: '更新包会从官方 GitHub Release 下载并校验 SHA256。服务将短暂重启，失败时自动恢复当前版本。',
+      confirmLabel: '立即更新',
+      icon: 'circle-arrow-up'
+    });
+    if (!confirmed) return;
+    const button = document.getElementById('update-button');
+    button.disabled = true;
+    try {
+      const next = await api('/_admin/api/update', jsonOptions('POST', { version: status.latest_version }));
+      renderUpdateStatus(next);
+      toast(`正在更新到 Refract ${status.latest_version}`);
+      await waitForUpdatedVersion(status.latest_version);
+    } catch (failure) {
+      button.disabled = false;
+      toast('更新启动失败，请稍后重试');
+      refreshUpdateStatus(true).catch(() => {});
+    }
+  }
 
   function settleConfirmation(confirmed) {
     if (!confirmResolver) return;
@@ -1193,6 +1273,7 @@
     try {
       const session = await api('/_admin/api/session');
       document.getElementById('account-name').textContent = session.username;
+      renderUpdateStatus({ current_version: session.version, latest_version: session.version, update_available: false });
       const avatar = document.querySelector('.avatar');
       if (!avatar.querySelector('img')) avatar.textContent = session.username.slice(0, 1).toUpperCase();
     } catch (failure) { return; }
@@ -1202,6 +1283,7 @@
     document.getElementById('sidebar-collapse').addEventListener('click', () => setSidebarCollapsed(!document.body.classList.contains('sidebar-collapsed')));
     document.getElementById('mobile-menu-button').addEventListener('click', () => setMobileSidebar(!document.body.classList.contains('sidebar-open')));
     document.getElementById('sidebar-scrim').addEventListener('click', () => setMobileSidebar(false));
+    document.getElementById('update-button').addEventListener('click', startPanelUpdate);
     document.getElementById('full-width-button').addEventListener('click', () => setFullWidth(!document.querySelector('.workspace').classList.contains('full-width')));
     document.getElementById('command-button').addEventListener('click', openCommandPalette);
     document.getElementById('command-close').addEventListener('click', closeCommandPalette);
@@ -1464,6 +1546,9 @@
     if (viewMeta[initialView]) await switchView(initialView);
     await refresh(false);
     await refreshLive();
+    refreshUpdateStatus().catch(() => {
+      document.getElementById('update-button').title = '暂时无法检查更新';
+    });
     state.dashboardTimer = window.setInterval(() => refreshDashboard().catch(() => {}), 1000);
     state.liveTimer = window.setInterval(refreshLive, 1000);
     window.addEventListener('resize', () => {

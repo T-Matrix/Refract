@@ -3,6 +3,7 @@ FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
+ARG REFRACT_VERSION=1.8.0
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -10,7 +11,7 @@ RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -trimpath -ldflags="-s -w" -o /out/refract ./cmd/gateway
+    go build -trimpath -ldflags="-s -w -X github.com/T-Matrix/Refract/internal/gateway.Version=$REFRACT_VERSION" -o /out/refract ./cmd/gateway
 
 FROM alpine:3.23
 

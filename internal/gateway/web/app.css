@@ -205,9 +205,21 @@ select { padding-right: 34px; background-color: var(--panel); }
 .nav-button svg { flex: 0 0 16px; }
 .nav-button:hover { color: var(--text); background: var(--panel-alt); }
 .nav-button.active { color: var(--accent); background: var(--accent-soft); font-weight: 650; }
-.sidebar-footer { margin-top: auto; padding: 13px 10px 14px; border-top: 1px solid var(--border); color: var(--muted); font-size: 10px; line-height: 1.7; }
-.sidebar-footer strong, .sidebar-footer span { display: block; white-space: nowrap; }
-.sidebar-footer strong { color: var(--text); font-size: 11px; }
+.sidebar-footer { margin-top: auto; padding: 8px; border-top: 1px solid var(--border); color: var(--muted); font-size: 10px; }
+.sidebar-update { width: 100%; min-height: 48px; padding: 7px 8px; display: flex; align-items: center; gap: 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--muted); text-align: left; transition: color 160ms ease, background 160ms ease, border-color 160ms ease; }
+.sidebar-update:disabled { cursor: default; opacity: 1; }
+.sidebar-update.available { cursor: pointer; border-color: color-mix(in srgb, var(--red) 24%, var(--border)); background: color-mix(in srgb, var(--red-soft) 55%, transparent); }
+.sidebar-update.available:hover { border-color: color-mix(in srgb, var(--red) 40%, var(--border)); background: var(--red-soft); }
+.sidebar-update-copy { min-width: 0; flex: 1; }
+.sidebar-update-copy, .sidebar-update-copy strong, .sidebar-update-copy span { display: block; white-space: nowrap; }
+.sidebar-update-copy strong { color: var(--text); font-size: 11px; }
+.sidebar-version-row { min-width: 0; margin-top: 3px; }
+.sidebar-version-row > span { display: inline-block; vertical-align: middle; }
+.update-dot { width: 7px; height: 7px; margin-left: 6px; display: inline-block; vertical-align: middle; border-radius: 50%; background: var(--red); box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 14%, transparent); }
+.update-dot[hidden] { display: none; }
+.sidebar-update-icon { width: 16px; height: 16px; flex: 0 0 16px; display: none; color: var(--red); }
+.sidebar-update.available .sidebar-update-icon { display: block; }
+.sidebar-update.updating .sidebar-update-icon { display: block; color: var(--accent); animation: spin 700ms linear infinite; }
 .sidebar-collapse {
   position: absolute;
   top: 50%;
