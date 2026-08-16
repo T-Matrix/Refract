@@ -159,6 +159,15 @@ func parseRawTarget(r *http.Request, trustedPublicHosts ...string) (*url.URL, bo
 	if err != nil {
 		return nil, true, "", "", err
 	}
+	if nested, ok := unwrapEmbyClientTarget(r, strings.TrimPrefix(target.EscapedPath(), "/"), trustedPublicHosts...); ok {
+		if cleanQuery != "" {
+			nested += "?" + cleanQuery
+		}
+		target, err = parseHTTPURL(nested)
+		if err != nil {
+			return nil, true, "", "", err
+		}
+	}
 	return target, true, expires, signature, nil
 }
 

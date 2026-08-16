@@ -167,6 +167,34 @@ func TestGatewayProxiesEmbyPrefixedSignedStreamURL(t *testing.T) {
 	}
 }
 
+func TestGatewayProxiesNestedEmbyPrefixedSignedStreamURL(t *testing.T) {
+	stream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/Videos/1/stream.mkv" || request.URL.Query().Get("token") != "abc" {
+			t.Errorf("stream URL = %q", request.URL.String())
+		}
+		_, _ = writer.Write([]byte("stream-data"))
+	}))
+	defer stream.Close()
+
+	gateway, gatewayServer := newTestGateway(t, stream.URL)
+	defer gateway.Close()
+	defer gatewayServer.Close()
+
+	target := mustURL(t, stream.URL+"/Videos/1/stream.mkv?token=abc")
+	signedURL := gateway.signedDynamicURL(target, gatewayServer.URL)
+	configuredBase := gatewayServer.URL + "/" + stream.URL
+	mangledURL := configuredBase + "/emby" + signedURL
+	response, err := http.Get(mangledURL)
+	if err != nil {
+		t.Fatalf("nested Emby-prefixed stream request: %v", err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || string(body) != "stream-data" {
+		t.Fatalf("stream response status=%d body=%q", response.StatusCode, body)
+	}
+}
+
 func TestGatewayRewritesJSONAndHLSBackends(t *testing.T) {
 	cdn := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		_, _ = writer.Write([]byte("cdn:" + request.URL.Path))
