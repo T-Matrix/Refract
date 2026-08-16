@@ -279,28 +279,12 @@ func (g *Gateway) rewriteJSONValue(value any, key string, info *targetInfo) (any
 	return value, false
 }
 
-func (g *Gateway) rewriteJSONString(value, key string, info *targetInfo) (string, bool) {
+func (g *Gateway) rewriteJSONString(value, _ string, info *targetInfo) (string, bool) {
 	trimmed := strings.TrimSpace(value)
 	if hasHTTPPrefix(trimmed) || strings.HasPrefix(trimmed, "//") {
 		return g.rewriteReference(trimmed, info.URL, info)
 	}
-	if info.Dynamic && strings.HasPrefix(trimmed, "/") && looksLikeURLField(key, trimmed) {
-		return g.rewriteReference(trimmed, info.URL, info)
-	}
 	return value, false
-}
-
-func looksLikeURLField(key, value string) bool {
-	key = strings.ToLower(key)
-	for _, marker := range []string{"url", "uri", "path", "stream", "media", "manifest", "playlist", "subtitle"} {
-		if strings.Contains(key, marker) {
-			return true
-		}
-	}
-	lower := strings.ToLower(value)
-	return strings.Contains(lower, "/videos/") || strings.Contains(lower, "/audio/") ||
-		strings.Contains(lower, "/livestreams/") || strings.HasSuffix(lower, ".m3u8") ||
-		strings.HasSuffix(lower, ".mpd")
 }
 
 func (g *Gateway) rewriteHLS(body string, info *targetInfo) string {

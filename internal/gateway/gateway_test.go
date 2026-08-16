@@ -224,6 +224,58 @@ func TestGatewayRewritesJSONAndHLSBackends(t *testing.T) {
 	}
 }
 
+func TestGatewayPreservesRelativePlaybackURLsForDynamicTarget(t *testing.T) {
+	cdn := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = writer.Write([]byte("cdn:" + request.URL.Path))
+	}))
+	defer cdn.Close()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/emby/Items/1/PlaybackInfo" {
+			http.NotFound(writer, request)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"MediaSources": []any{map[string]any{
+				"DirectStreamUrl": "/videos/1/stream.mkv?MediaSourceId=1",
+				"TranscodingUrl":  cdn.URL + "/videos/1/master.m3u8?MediaSourceId=1",
+			}},
+		})
+	}))
+	defer upstream.Close()
+
+	gateway, gatewayServer := newTestGateway(t, upstream.URL)
+	defer gateway.Close()
+	defer gatewayServer.Close()
+
+	playbackTarget := mustURL(t, upstream.URL+"/emby/Items/1/PlaybackInfo")
+	response, err := http.Get(gateway.signedDynamicURL(playbackTarget, gatewayServer.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		MediaSources []struct {
+			DirectStreamURL string `json:"DirectStreamUrl"`
+			TranscodingURL  string `json:"TranscodingUrl"`
+		} `json:"MediaSources"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if len(payload.MediaSources) != 1 {
+		t.Fatalf("media sources = %#v", payload.MediaSources)
+	}
+	media := payload.MediaSources[0]
+	if media.DirectStreamURL != "/videos/1/stream.mkv?MediaSourceId=1" {
+		t.Fatalf("relative DirectStreamUrl was rewritten: %q", media.DirectStreamURL)
+	}
+	if !strings.HasPrefix(media.TranscodingURL, gatewayServer.URL+"/http://") || !strings.Contains(media.TranscodingURL, signatureParam+"=") {
+		t.Fatalf("absolute TranscodingUrl was not signed: %q", media.TranscodingURL)
+	}
+}
+
 func TestGatewayPreservesRangeResponse(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Range") != "bytes=10-19" {
