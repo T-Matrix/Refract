@@ -260,7 +260,8 @@ update_legacy_systemd() {
 
     legacy_stamp="$(date +%Y%m%d-%H%M%S)"
     legacy_backup="$legacy_dir/deploy-backups/auto-$legacy_stamp"
-    mkdir -m 0700 -p "$legacy_backup"
+    mkdir -p "$legacy_dir/deploy-backups"
+    mkdir -m 0700 "$legacy_backup"
     cp -p "$legacy_binary" "$legacy_backup/vps-url-gateway"
     install -m 0755 "$legacy_work/$legacy_asset" "$legacy_binary.next"
 
