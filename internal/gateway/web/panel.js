@@ -3,7 +3,7 @@
 
   const state = {
     snapshot: null, geography: null, overviewPeriod: '24h', geoChart: null, geoMapPromise: null,
-    view: 'overview', dashboardTimer: null, dashboardPromise: null, liveTimer: null, liveRefreshing: false,
+    view: 'overview', dashboardTimer: null, dashboardPromise: null, liveTimer: null, liveRefreshing: false, updateTimer: null,
     policy: null, telegram: null, turnstile: null, turnstileWidget: null, turnstileToken: '',
     report: null, reportPeriod: '24h', reportLiveChart: null, reportTrendChart: null, reportRegionChart: null,
     liveSeries: [], backups: null, update: null
@@ -1549,6 +1549,7 @@
     refreshUpdateStatus().catch(() => {
       document.getElementById('update-button').title = '暂时无法检查更新';
     });
+    state.updateTimer = window.setInterval(() => refreshUpdateStatus().catch(() => {}), 10 * 60 * 1000);
     state.dashboardTimer = window.setInterval(() => refreshDashboard().catch(() => {}), 1000);
     state.liveTimer = window.setInterval(refreshLive, 1000);
     window.addEventListener('resize', () => {

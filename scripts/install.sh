@@ -14,6 +14,7 @@ admin_user="${REFRACT_ADMIN_USER:-admin}"
 public_proxy="${REFRACT_PUBLIC_PROXY:-false}"
 allow_private="${REFRACT_ALLOW_PRIVATE_TARGETS:-false}"
 assume_yes=0
+inferred_public_proxy=0
 
 usage() {
     cat <<'EOF'
@@ -24,7 +25,7 @@ Refract 一键部署脚本
 
 选项：
   --domain DOMAIN          已解析到 VPS 的域名
-  --upstream URL           默认上游，例如 https://emby.example.com
+  --upstream URL           默认上游，例如 https://emby.example.com；交互安装可留空
   --allow-hosts LIST       可直接访问的初始上游，逗号分隔
   --admin-user USER        初始管理员用户名，默认 admin
   --public-proxy           允许代理任意公网 HTTP/HTTPS 目标
@@ -90,6 +91,10 @@ is_true() {
         1|true|yes|on) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+has_interactive_terminal() {
+    [ -t 1 ] && [ -c /dev/tty ]
 }
 
 while [ "$#" -gt 0 ]; do
@@ -344,7 +349,14 @@ else
     valid_domain "$domain" || fail "域名格式不正确：$domain"
 
     if [ -z "$upstream" ] && [ -z "$allowed_upstreams" ] && ! is_true "$public_proxy"; then
-        upstream="$(ask "请输入默认 Emby/Jellyfin 地址（不含末尾斜杠）")"
+        upstream="$(ask "请输入默认 Emby/Jellyfin 地址（留空启用通用反代）")"
+        if [ -z "$upstream" ]; then
+            if ! has_interactive_terminal; then
+                fail "非交互安装未配置默认上游；如需通用反代，请显式添加 --public-proxy"
+            fi
+            public_proxy=true
+            inferred_public_proxy=1
+        fi
     fi
     if [ -n "$upstream" ]; then
         valid_upstream "$upstream" || fail "上游必须是仅含协议和主机的 HTTP/HTTPS 地址"
@@ -355,15 +367,17 @@ else
 
     if is_true "$public_proxy"; then
         warn "通用开放模式允许任何用户代理任意公网 HTTP/HTTPS 目标，可能被滥用。私网与保留地址仍默认阻止。"
-        if [ "$assume_yes" -ne 1 ] && ! confirm "确认启用通用开放模式" "n"; then
+        confirm_default=n
+        if [ "$inferred_public_proxy" -eq 1 ]; then
+            confirm_default=y
+        fi
+        if [ "$assume_yes" -ne 1 ] && ! confirm "确认启用通用开放模式" "$confirm_default"; then
             fail "已取消部署"
         fi
         public_proxy=true
     else
         public_proxy=false
-        if [ -z "$upstream" ] && [ -z "$allowed_upstreams" ]; then
-            fail "安全模式至少需要 --upstream 或 --allow-hosts"
-        fi
+        [ -n "$upstream" ] || [ -n "$allowed_upstreams" ] || fail "安全模式至少需要 --upstream 或 --allow-hosts"
     fi
 
     if is_true "$allow_private"; then

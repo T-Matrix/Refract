@@ -25,7 +25,7 @@ import (
 	"time"
 )
 
-var Version = "1.8.0"
+var Version = "1.8.1"
 
 const (
 	defaultReleaseAPI  = "https://api.github.com/repos/T-Matrix/Refract/releases/latest"
