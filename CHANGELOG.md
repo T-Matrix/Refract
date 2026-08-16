@@ -2,6 +2,19 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的结构，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.9.0] - 2026-08-17
+
+### 新增
+
+- 系统设置新增结构化运行配置，可管理默认上游、允许上游、通用反代、客户端 IP、缓存、重写上限、超时与并发限制。
+- 运行配置使用私有文件、原子替换和上一版本备份；配置损坏时启动过程自动回退。
+- 原生 systemd 部署新增受限维护 Socket，让低权限面板进程可以请求安装经过官方 Release 与 SHA-256 双重校验的更新。
+
+### 安全
+
+- 入口域名只读展示，避免只修改应用地址而未同步 DNS、证书和前置代理。
+- 维护 Socket 不接受命令、URL、服务名或文件路径，Web 服务继续以无特权账号运行。
+
 ## [1.7.2] - 2026-08-16
 
 ### 改进
@@ -31,3 +44,4 @@
 
 [1.7.2]: https://github.com/T-Matrix/Refract/releases/tag/v1.7.2
 [1.7.1]: https://github.com/T-Matrix/Refract/releases/tag/v1.7.1
+[1.9.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.9.0

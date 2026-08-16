@@ -25,13 +25,14 @@ import (
 	"time"
 )
 
-var Version = "1.8.1"
+var Version = "1.9.0"
 
 const (
-	defaultReleaseAPI  = "https://api.github.com/repos/T-Matrix/Refract/releases/latest"
-	defaultReleaseBase = "https://github.com/T-Matrix/Refract/releases/download"
-	maxReleaseMetadata = 1 << 20
-	maxReleaseBinary   = 128 << 20
+	defaultReleaseAPI        = "https://api.github.com/repos/T-Matrix/Refract/releases/latest"
+	defaultReleaseBase       = "https://github.com/T-Matrix/Refract/releases/download"
+	defaultMaintenanceSocket = "/run/refract-maintenance.sock"
+	maxReleaseMetadata       = 1 << 20
+	maxReleaseBinary         = 128 << 20
 )
 
 var (
@@ -68,15 +69,26 @@ type releaseInfo struct {
 	Assets  map[string]releaseAsset
 }
 
+type maintenanceRequest struct {
+	Action  string `json:"action"`
+	Version string `json:"version"`
+}
+
+type maintenanceResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
 type updateManager struct {
-	client         *http.Client
-	apiURL         string
-	releaseBaseURL string
-	executable     string
-	service        string
-	systemdRun     string
-	healthURL      string
-	unsupported    string
+	client            *http.Client
+	apiURL            string
+	releaseBaseURL    string
+	executable        string
+	service           string
+	systemdRun        string
+	healthURL         string
+	maintenanceSocket string
+	unsupported       string
 
 	cacheMu    sync.Mutex
 	cached     updateStatus
@@ -98,8 +110,9 @@ func newUpdateManager(cfg Config) *updateManager {
 				return nil
 			},
 		},
-		apiURL:         defaultReleaseAPI,
-		releaseBaseURL: defaultReleaseBase,
+		apiURL:            defaultReleaseAPI,
+		releaseBaseURL:    defaultReleaseBase,
+		maintenanceSocket: envString("REFRACT_MAINTENANCE_SOCKET", defaultMaintenanceSocket),
 	}
 	manager.executable, _ = os.Executable()
 	manager.executable, _ = filepath.Abs(manager.executable)
@@ -154,14 +167,16 @@ func (m *updateManager) autoUpdateUnsupportedReason() string {
 		return "linux_required"
 	case runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64":
 		return "unsupported_architecture"
-	case os.Geteuid() != 0:
-		return "root_required"
 	case m.executable == "" || !filepath.IsAbs(m.executable):
 		return "executable_unavailable"
-	case m.service == "" || m.systemdRun == "":
+	case m.service == "":
 		return "native_systemd_required"
 	case m.healthURL == "":
 		return "health_check_unavailable"
+	case os.Geteuid() != 0 && !maintenanceSocketAvailable(m.maintenanceSocket):
+		return "maintenance_service_required"
+	case os.Geteuid() == 0 && m.systemdRun == "":
+		return "systemd_run_required"
 	default:
 		return ""
 	}
@@ -272,6 +287,14 @@ func (m *updateManager) Start(ctx context.Context, requestedVersion string) (upd
 	if !status.AutoUpdateSupported {
 		return updateStatus{}, errors.New("automatic update is not supported by this deployment")
 	}
+	if os.Geteuid() != 0 {
+		if err := m.requestMaintenanceUpdate(ctx, release.Version); err != nil {
+			return updateStatus{}, err
+		}
+		started = true
+		status.Updating = true
+		return status, nil
+	}
 
 	staged, err := m.downloadRelease(ctx, release)
 	if err != nil {
@@ -312,6 +335,75 @@ func (m *updateManager) Start(ctx context.Context, requestedVersion string) (upd
 	removeStaged = false
 	status.Updating = true
 	return status, nil
+}
+
+func maintenanceSocketAvailable(path string) bool {
+	if path == "" || !filepath.IsAbs(path) {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && info.Mode()&os.ModeSocket != 0
+}
+
+func (m *updateManager) requestMaintenanceUpdate(ctx context.Context, version string) error {
+	if !maintenanceSocketAvailable(m.maintenanceSocket) {
+		return errors.New("maintenance service is unavailable")
+	}
+	dialer := net.Dialer{Timeout: 5 * time.Second}
+	connection, err := dialer.DialContext(ctx, "unix", m.maintenanceSocket)
+	if err != nil {
+		return fmt.Errorf("connect maintenance service: %w", err)
+	}
+	defer connection.Close()
+	_ = connection.SetDeadline(time.Now().Add(2 * time.Minute))
+	if err := json.NewEncoder(connection).Encode(maintenanceRequest{Action: "update", Version: normalizedVersion(version)}); err != nil {
+		return fmt.Errorf("request maintenance update: %w", err)
+	}
+	var response maintenanceResponse
+	if err := json.NewDecoder(io.LimitReader(connection, maxReleaseMetadata)).Decode(&response); err != nil {
+		return fmt.Errorf("read maintenance response: %w", err)
+	}
+	if !response.OK {
+		if response.Error == "" {
+			response.Error = "maintenance update was rejected"
+		}
+		return errors.New(response.Error)
+	}
+	return nil
+}
+
+// RunMaintenanceRequest is the root-only side of the systemd socket. Its
+// protocol intentionally exposes no command, URL, service, or filesystem path.
+func RunMaintenanceRequest(input io.Reader, output io.Writer) error {
+	respond := func(response maintenanceResponse) error {
+		return json.NewEncoder(output).Encode(response)
+	}
+	if os.Geteuid() != 0 {
+		return respond(maintenanceResponse{Error: "maintenance helper requires root"})
+	}
+	var request maintenanceRequest
+	decoder := json.NewDecoder(io.LimitReader(input, maxReleaseMetadata))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		return respond(maintenanceResponse{Error: "invalid maintenance request"})
+	}
+	version, ok := parseVersion(request.Version)
+	if request.Action != "update" || !ok || version.String() != normalizedVersion(request.Version) {
+		return respond(maintenanceResponse{Error: "unsupported maintenance request"})
+	}
+	cfg, err := LoadConfig()
+	if err != nil {
+		return respond(maintenanceResponse{Error: "service configuration is invalid"})
+	}
+	manager := newUpdateManager(cfg)
+	manager.maintenanceSocket = ""
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if _, err := manager.Start(ctx, version.String()); err != nil {
+		log.Printf("maintenance update rejected version=%s error=%v", version.String(), err)
+		return respond(maintenanceResponse{Error: "verified update could not be started"})
+	}
+	return respond(maintenanceResponse{OK: true})
 }
 
 func (m *updateManager) downloadRelease(ctx context.Context, release releaseInfo) (string, error) {

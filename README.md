@@ -29,6 +29,7 @@ https://proxy.example.com/http://origin.example.com:8096/path
 - 24 小时、7 天、30 天、90 天统计与 CSV 导出。
 - 可关闭的域名黑名单 / 白名单模式，规则只匹配域名及子域名。
 - Telegram 日报、Cloudflare Turnstile、管理审计与 SQLite 备份恢复。
+- 面板结构化管理常用运行参数，保存前校验并保留上一份可用配置；敏感密钥不向网页返回。
 - 侧栏自动检查 GitHub Release；新版本显示红点，原生 systemd 部署可在面板校验、更新并失败回滚。
 - Docker Compose + Caddy 自动申请和续期 HTTPS 证书。
 
@@ -111,7 +112,7 @@ curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/insta
 脚本会执行快进更新并重建容器，现有 `.env`、SQLite 数据、面板账号和证书都会保留。
 旧版 `/opt/vps-url-gateway` systemd 部署也会被自动识别，脚本将校验最新 Release、备份当前二进制并原地更新；健康检查失败时自动回滚。
 
-原生 systemd 部署升级到支持面板更新的版本后，侧栏左下角会自动检查官方 GitHub Release。有新版本时版本号旁显示红点，点击版本区域并确认即可完成 SHA256 校验、原子替换、服务重启和健康检查；更新失败会自动恢复旧二进制。Docker Compose 部署不向容器挂载宿主机 Docker 控制权限，因此仍使用上面的一键更新命令。
+原生 systemd 部署升级到支持面板更新的版本后，脚本会安装一个受限的 root 维护 Socket，主服务仍以 `vps-url-gateway` 低权限账号运行。侧栏左下角会自动检查官方 GitHub Release；有新版本时版本号旁显示红点，点击版本区域并确认即可完成 SHA256 校验、原子替换、服务重启和健康检查，失败时自动恢复旧二进制。维护接口不接受任意命令、下载地址或文件路径。Docker Compose 部署不向容器挂载宿主机 Docker 控制权限，因此二进制更新仍使用上面的一键更新命令。
 
 ## 手动部署
 
@@ -206,8 +207,10 @@ https://proxy.example.com/http://emby.example.com:8096
 | `GEOIP_LOOKUP_URL` | `ipwho.is` | 必须是含 `{ip}` 的 HTTPS 查询地址，留空关闭定位 |
 | `MAX_CONCURRENT_REQUESTS` | `256` | 全局并发请求限制 |
 | `MAX_CONCURRENT_PER_IP` | `64` | 单客户端 IP 并发限制 |
+| `RUNTIME_CONFIG_PATH` | 数据库同级 | 面板运行配置覆盖文件；留空自动使用 `runtime-config.json` |
+| `RESTART_ON_CONFIG_SAVE` | `false` | 保存运行配置后退出并由 systemd/Docker 自动重启 |
 
-完整配置和注释参见 [.env.example](.env.example)。Turnstile 与 Telegram 密钥由面板保存，不写入环境变量；服务端使用从管理会话密钥派生的 AES-256-GCM 密钥加密。
+完整配置和注释参见 [.env.example](.env.example)。面板可以修改默认上游、允许上游、通用反代、客户端 IP、缓存、响应重写上限、超时和并发；入口域名涉及 DNS、证书和前置代理，只读展示。`SIGNING_SECRET`、管理会话密钥、密码 Hash 和数据库路径不会通过配置 API 返回。Turnstile 与 Telegram 密钥由面板保存，不写入环境变量；服务端使用从管理会话密钥派生的 AES-256-GCM 密钥加密。
 
 ## 日常运维
 

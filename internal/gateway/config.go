@@ -15,6 +15,7 @@ type Config struct {
 	PublicBaseURL       *url.URL
 	DefaultUpstream     *url.URL
 	AllowedUpstreams    []TargetPattern
+	AllowedUpstreamsRaw string
 	SigningSecret       []byte
 	SignedURLTTL        time.Duration
 	AllowUnsigned       bool
@@ -38,6 +39,8 @@ type Config struct {
 	GeoIPLookupInterval time.Duration
 	MaxConcurrent       int
 	MaxConcurrentPerIP  int
+	RuntimeConfigPath   string
+	RestartOnConfigSave bool
 }
 
 type TargetPattern struct {
@@ -71,6 +74,11 @@ func LoadConfig() (Config, error) {
 		GeoIPLookupInterval: envDuration("GEOIP_LOOKUP_INTERVAL", 1100*time.Millisecond),
 		MaxConcurrent:       envInt("MAX_CONCURRENT_REQUESTS", 256),
 		MaxConcurrentPerIP:  envInt("MAX_CONCURRENT_PER_IP", 64),
+		RuntimeConfigPath:   strings.TrimSpace(os.Getenv("RUNTIME_CONFIG_PATH")),
+		RestartOnConfigSave: envBool("RESTART_ON_CONFIG_SAVE", false),
+	}
+	if cfg.AdminEnabled {
+		cfg.RuntimeConfigPath = resolveRuntimeConfigPath(cfg.RuntimeConfigPath, cfg.AdminDatabasePath)
 	}
 
 	var err error
@@ -97,7 +105,8 @@ func LoadConfig() (Config, error) {
 		cfg.DefaultUpstream.Fragment = ""
 	}
 
-	patterns, err := parseTargetPatterns(os.Getenv("ALLOWED_UPSTREAMS"))
+	cfg.AllowedUpstreamsRaw = strings.TrimSpace(os.Getenv("ALLOWED_UPSTREAMS"))
+	patterns, err := parseTargetPatterns(cfg.AllowedUpstreamsRaw)
 	if err != nil {
 		return Config{}, fmt.Errorf("ALLOWED_UPSTREAMS: %w", err)
 	}
@@ -111,6 +120,10 @@ func LoadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("SIGNING_SECRET must contain at least 32 characters")
 	}
 	cfg.SigningSecret = []byte(secret)
+
+	if cfg.AdminEnabled {
+		cfg = loadRuntimeConfigWithFallback(cfg)
+	}
 
 	if cfg.SignedURLTTL <= 0 {
 		return Config{}, fmt.Errorf("SIGNED_URL_TTL must be positive")

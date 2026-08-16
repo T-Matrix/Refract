@@ -146,7 +146,7 @@ func TestUpdateAPIRequiresAuthenticationAndSameOrigin(t *testing.T) {
 	cookie := loginAdmin(t, gateway)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(writer).Encode(latestRelease{
-			TagName: "v1.8.2",
+			TagName: "v1.9.1",
 			Assets:  []releaseAsset{{Name: "refract-linux-" + runtime.GOARCH}, {Name: "SHA256SUMS.txt"}},
 		})
 	}))
@@ -164,7 +164,7 @@ func TestUpdateAPIRequiresAuthenticationAndSameOrigin(t *testing.T) {
 	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"update_available":true`) {
 		t.Fatalf("update check status=%d body=%s", status.Code, status.Body.String())
 	}
-	crossOrigin := adminRequest(t, gateway, http.MethodPost, "/_admin/api/update", map[string]string{"version": "1.8.2"}, cookie, false)
+	crossOrigin := adminRequest(t, gateway, http.MethodPost, "/_admin/api/update", map[string]string{"version": "1.9.1"}, cookie, false)
 	if crossOrigin.Code != http.StatusForbidden {
 		t.Fatalf("cross-origin update status=%d body=%s", crossOrigin.Code, crossOrigin.Body.String())
 	}

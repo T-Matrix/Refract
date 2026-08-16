@@ -270,6 +270,10 @@ update_legacy_systemd() {
     cp -p "$legacy_binary" "$legacy_backup/vps-url-gateway"
     install -m 0755 "$legacy_work/$legacy_asset" "$legacy_binary.next"
 
+    if ! grep -q '^RESTART_ON_CONFIG_SAVE=' /etc/vps-url-gateway.env; then
+        printf '\nRESTART_ON_CONFIG_SAVE=true\n' >>/etc/vps-url-gateway.env
+    fi
+
     say "更新旧版服务"
     systemctl stop vps-url-gateway.service
     if ! mv "$legacy_binary.next" "$legacy_binary" || ! systemctl start vps-url-gateway.service; then
@@ -297,7 +301,74 @@ update_legacy_systemd() {
     fi
     rm -rf "$legacy_work"
     trap - 0 1 2 15
+    install_legacy_maintenance_socket
     say "旧版 systemd 部署已更新，配置、数据库和证书均已保留"
+}
+
+install_legacy_maintenance_socket() {
+    say "配置低权限面板维护通道"
+    cat >/etc/systemd/system/refract-maintenance.socket <<'EOF'
+[Unit]
+Description=Refract restricted maintenance socket
+
+[Socket]
+ListenStream=/run/refract-maintenance.sock
+SocketUser=root
+SocketGroup=vps-url-gateway
+SocketMode=0660
+DirectoryMode=0755
+Accept=yes
+MaxConnections=2
+TriggerLimitIntervalSec=60s
+TriggerLimitBurst=10
+RemoveOnStop=true
+
+[Install]
+WantedBy=sockets.target
+EOF
+    cat >/etc/systemd/system/refract-maintenance@.service <<'EOF'
+[Unit]
+Description=Refract verified maintenance request
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/etc/vps-url-gateway.env
+Environment=REFRACT_SYSTEMD_SERVICE=vps-url-gateway.service
+ExecStart=/opt/vps-url-gateway/vps-url-gateway _maintenance-request
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+TimeoutStartSec=3min
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/opt/vps-url-gateway
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+EOF
+    systemctl daemon-reload
+    systemctl enable --now refract-maintenance.socket >/dev/null
+    systemctl restart vps-url-gateway.service
+    maintenance_attempt=0
+    until curl -fsS http://127.0.0.1:8080/_gateway/health >/dev/null 2>&1; do
+        maintenance_attempt=$((maintenance_attempt + 1))
+        if [ "$maintenance_attempt" -ge 30 ]; then
+            fail "维护通道安装后服务健康检查失败"
+        fi
+        sleep 1
+    done
 }
 
 say "检查系统依赖"

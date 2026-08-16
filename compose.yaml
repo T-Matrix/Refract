@@ -3,7 +3,7 @@ services:
     build:
       context: .
       args:
-        REFRACT_VERSION: "${REFRACT_VERSION:-1.8.1}"
+        REFRACT_VERSION: "${REFRACT_VERSION:-1.9.0}"
     image: refract:local
     restart: unless-stopped
     environment:
@@ -35,6 +35,7 @@ services:
       GEOIP_LOOKUP_INTERVAL: "${GEOIP_LOOKUP_INTERVAL:-1100ms}"
       MAX_CONCURRENT_REQUESTS: "${MAX_CONCURRENT_REQUESTS:-256}"
       MAX_CONCURRENT_PER_IP: "${MAX_CONCURRENT_PER_IP:-64}"
+      RESTART_ON_CONFIG_SAVE: "true"
     volumes:
       - gateway_data:/data
     networks:

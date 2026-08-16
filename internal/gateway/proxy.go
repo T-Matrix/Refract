@@ -32,12 +32,14 @@ type Gateway struct {
 	backups     *backupManager
 	geo         *geoTracker
 	updates     *updateManager
+	runtime     *runtimeConfigManager
 	limiter     *requestLimiter
 	meter       *rateMeter
 	connections *connectionTracker
 	started     time.Time
 	active      atomic.Int64
 	blocked     atomic.Uint64
+	restarting  atomic.Bool
 	policy      atomic.Pointer[proxyPolicy]
 }
 
@@ -55,6 +57,9 @@ func NewChecked(cfg Config) (*Gateway, error) {
 	}
 	if cfg.MaxConcurrentPerIP <= 0 || cfg.MaxConcurrentPerIP > cfg.MaxConcurrent {
 		cfg.MaxConcurrentPerIP = min(64, cfg.MaxConcurrent)
+	}
+	if cfg.AdminEnabled {
+		cfg.RuntimeConfigPath = resolveRuntimeConfigPath(cfg.RuntimeConfigPath, cfg.AdminDatabasePath)
 	}
 	gateway := &Gateway{
 		cfg:         cfg,
@@ -157,6 +162,7 @@ func NewChecked(cfg Config) (*Gateway, error) {
 		}
 		gateway.backups = backups
 		gateway.updates = newUpdateManager(cfg)
+		gateway.runtime = newRuntimeConfigManager(cfg)
 		admin, err := newAdminServer(gateway, store, cfg)
 		if err != nil {
 			backups.Close()

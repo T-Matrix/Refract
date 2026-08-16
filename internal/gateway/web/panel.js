@@ -4,7 +4,7 @@
   const state = {
     snapshot: null, geography: null, overviewPeriod: '24h', geoChart: null, geoMapPromise: null,
     view: 'overview', dashboardTimer: null, dashboardPromise: null, liveTimer: null, liveRefreshing: false, updateTimer: null,
-    policy: null, telegram: null, turnstile: null, turnstileWidget: null, turnstileToken: '',
+    policy: null, telegram: null, turnstile: null, turnstileWidget: null, turnstileToken: '', runtimeConfig: null,
     report: null, reportPeriod: '24h', reportLiveChart: null, reportTrendChart: null, reportRegionChart: null,
     liveSeries: [], backups: null, update: null
   };
@@ -18,7 +18,7 @@
     rules: ['访问规则', '按域名后缀控制访问', 'shield-check'],
     audit: ['审计日志', '管理操作与登录记录', 'list-checks'],
     backups: ['备份恢复', '自动备份与 SQLite 快照', 'database-backup'],
-    settings: ['系统设置', '通知、认证与强制防护', 'settings']
+    settings: ['系统设置', '运行参数、通知与登录安全', 'settings']
   };
 
   function formatBytes(value) {
@@ -877,7 +877,8 @@
     'policy.domain.quick': '快捷域名规则', 'connection.terminate': '断开实时连接',
     'telegram.settings': '修改 Telegram', 'telegram.test': '测试 Telegram',
     'backup.auto': '自动备份', 'backup.create': '创建备份', 'backup.import': '导入备份',
-    'backup.restore': '恢复备份', 'backup.delete': '删除备份', 'backup.settings': '修改备份策略'
+    'backup.restore': '恢复备份', 'backup.delete': '删除备份', 'backup.settings': '修改备份策略',
+    'system.configuration': '修改运行配置'
   };
 
   function renderAudit(payload) {
@@ -1002,6 +1003,64 @@
     document.getElementById('telegram-hour').value = String(config.send_hour ?? 9);
     document.getElementById('telegram-token').value = '';
     document.getElementById('telegram-token-status').textContent = config.token_set ? 'Token 已加密保存，留空保持不变' : '尚未配置';
+  }
+
+  function renderRuntimeConfig(config) {
+    state.runtimeConfig = config;
+    document.getElementById('runtime-public-url').value = config.public_base_url || '';
+    document.getElementById('runtime-default-upstream').value = config.default_upstream || '';
+    document.getElementById('runtime-allowed-upstreams').value = String(config.allowed_upstreams || '').split(',').map((item) => item.trim()).filter(Boolean).join('\n');
+    document.getElementById('runtime-public-proxy').checked = Boolean(config.allow_unsigned_targets);
+    document.getElementById('runtime-pass-ip').checked = Boolean(config.pass_client_ip);
+    document.getElementById('runtime-disable-cache').checked = Boolean(config.disable_cache);
+    document.getElementById('runtime-rewrite-mb').value = String(Math.max(1, Math.round(Number(config.rewrite_max_bytes || 8388608) / 1048576)));
+    document.getElementById('runtime-dns-ttl').value = String(config.dns_cache_ttl_seconds ?? 60);
+    document.getElementById('runtime-dial-timeout').value = String(config.dial_timeout_seconds ?? 15);
+    document.getElementById('runtime-response-timeout').value = String(config.response_header_timeout_seconds ?? 60);
+    document.getElementById('runtime-global-limit').value = String(config.max_concurrent_requests ?? 256);
+    document.getElementById('runtime-ip-limit').value = String(config.max_concurrent_per_ip ?? 64);
+    const status = document.getElementById('runtime-config-status');
+    const pending = Boolean(config.restart_pending);
+    status.classList.toggle('muted-badge', pending || !config.restart_on_save);
+    status.innerHTML = pending ? '<i data-lucide="rotate-cw"></i>正在重启' : config.restart_on_save ? '<i data-lucide="badge-check"></i>自动应用' : '<i data-lucide="clock-3"></i>需手动重启';
+    window.lucide?.createIcons();
+  }
+
+  async function refreshRuntimeConfig() {
+    renderRuntimeConfig(await api('/_admin/api/runtime-config'));
+  }
+
+  function runtimeConfigPayload() {
+    const allowed = document.getElementById('runtime-allowed-upstreams').value
+      .split(/[\n,]+/).map((item) => item.trim()).filter(Boolean).join(',');
+    return {
+      default_upstream: document.getElementById('runtime-default-upstream').value.trim(),
+      allowed_upstreams: allowed,
+      allow_unsigned_targets: document.getElementById('runtime-public-proxy').checked,
+      pass_client_ip: document.getElementById('runtime-pass-ip').checked,
+      disable_cache: document.getElementById('runtime-disable-cache').checked,
+      rewrite_max_bytes: Number(document.getElementById('runtime-rewrite-mb').value) * 1048576,
+      dns_cache_ttl_seconds: Number(document.getElementById('runtime-dns-ttl').value),
+      dial_timeout_seconds: Number(document.getElementById('runtime-dial-timeout').value),
+      response_header_timeout_seconds: Number(document.getElementById('runtime-response-timeout').value),
+      max_concurrent_requests: Number(document.getElementById('runtime-global-limit').value),
+      max_concurrent_per_ip: Number(document.getElementById('runtime-ip-limit').value)
+    };
+  }
+
+  async function waitForRuntimeRestart() {
+    await new Promise((resolve) => window.setTimeout(resolve, 2500));
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      try {
+        const response = await fetch('/_admin/api/runtime-config', { credentials: 'same-origin', cache: 'no-store' });
+        if (response.ok) {
+          window.location.replace('/panel?configured=1#settings');
+          return;
+        }
+      } catch (failure) { /* The service is restarting. */ }
+      await new Promise((resolve) => window.setTimeout(resolve, 1500));
+    }
+    toast('服务仍在重启，请稍后刷新页面');
   }
 
   function resetTurnstileWidget() {
@@ -1146,6 +1205,7 @@
     if (view === 'audit') refreshAudit().catch(() => toast('审计日志加载失败'));
     if (view === 'backups') refreshBackups().catch(() => toast('备份列表加载失败'));
     if (view === 'settings') {
+      refreshRuntimeConfig().catch(() => toast('运行配置加载失败'));
       api('/_admin/api/telegram').then(renderTelegram).catch(() => toast('Telegram 配置加载失败'));
       refreshTurnstile().catch(() => toast('Turnstile 配置加载失败'));
     }
@@ -1416,6 +1476,42 @@
       event.preventDefault();
       try { await saveTelegram(true); }
       catch (failure) { const error = document.getElementById('telegram-error'); error.textContent = 'Telegram 配置无效'; error.hidden = false; }
+    });
+    document.getElementById('runtime-config-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const error = document.getElementById('runtime-config-error');
+      error.hidden = true;
+      if (!form.reportValidity()) return;
+      const payload = runtimeConfigPayload();
+      if (payload.max_concurrent_per_ip > payload.max_concurrent_requests) {
+        error.textContent = '单 IP 并发不能大于全局并发';
+        error.hidden = false;
+        document.getElementById('runtime-ip-limit').focus();
+        return;
+      }
+      const confirmed = await confirmAction({
+        title: '保存运行配置',
+        message: state.runtimeConfig?.restart_on_save ? '配置通过校验后服务会自动重启，当前代理连接将短暂中断。上一份配置会保留用于异常回退。' : '配置通过校验后写入安全覆盖文件，需要手动重启 Refract 才会生效。',
+        confirmLabel: state.runtimeConfig?.restart_on_save ? '保存并重启' : '保存配置',
+        icon: 'server-cog'
+      });
+      if (!confirmed) return;
+      const submit = form.querySelector('button[type="submit"]');
+      submit.disabled = true;
+      try {
+        const saved = await api('/_admin/api/runtime-config', jsonOptions('PUT', payload));
+        renderRuntimeConfig(saved);
+        if (saved.restart_pending) {
+          toast('配置已保存，服务正在重启');
+          await waitForRuntimeRestart();
+        } else {
+          toast('配置已保存，重启服务后生效');
+        }
+      } catch (failure) {
+        error.textContent = '配置保存失败，请检查上游格式、超时和并发数值';
+        error.hidden = false;
+      } finally { submit.disabled = false; }
     });
     document.getElementById('telegram-test').addEventListener('click', async (event) => {
       event.currentTarget.disabled = true;

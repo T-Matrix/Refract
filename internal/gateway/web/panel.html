@@ -6,11 +6,11 @@
   <meta name="robots" content="noindex,nofollow">
   <title>Refract</title>
   <link rel="icon" href="/_admin/assets/refract-icon.png" type="image/png">
-  <link rel="stylesheet" href="/_admin/assets/app.css?v=1.8.1-20260817">
+  <link rel="stylesheet" href="/_admin/assets/app.css?v=1.9.0-20260817">
   <script defer src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"></script>
   <script defer src="/_admin/assets/lucide.min.js"></script>
   <script defer src="/_admin/assets/echarts.min.js"></script>
-  <script defer src="/_admin/assets/panel.js?v=1.8.1-20260817"></script>
+  <script defer src="/_admin/assets/panel.js?v=1.9.0-20260817"></script>
 </head>
 <body class="panel-page">
   <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -49,7 +49,7 @@
         <button id="update-button" class="sidebar-update" type="button" disabled title="正在检查更新" aria-label="Refract 版本信息">
           <span class="sidebar-update-copy">
             <strong>Refract</strong>
-            <span class="sidebar-version-row"><span id="current-version">Version 1.8.1</span><i id="update-dot" class="update-dot" hidden></i></span>
+            <span class="sidebar-version-row"><span id="current-version">Version 1.9.0</span><i id="update-dot" class="update-dot" hidden></i></span>
           </span>
           <i id="update-icon" class="sidebar-update-icon" data-lucide="circle-arrow-up" aria-hidden="true"></i>
         </button>
@@ -302,6 +302,47 @@
                 <div><dt>遥测队列丢弃</dt><dd id="security-dropped">0</dd></div>
               </dl>
             </section>
+            <section class="data-section runtime-config-section">
+              <div class="section-heading">
+                <div><h2>运行配置</h2><p>保存前校验并保留上一份可用配置</p></div>
+                <span id="runtime-config-status" class="security-badge muted-badge"><i data-lucide="server-cog"></i>等待加载</span>
+              </div>
+              <form id="runtime-config-form">
+                <div class="runtime-wide-field">
+                  <label for="runtime-public-url">入口地址</label>
+                  <input id="runtime-public-url" type="url" disabled>
+                  <small class="field-status">由 DNS、证书和前置代理共同决定，请通过部署配置修改</small>
+                </div>
+                <div>
+                  <label for="runtime-default-upstream">默认上游</label>
+                  <input id="runtime-default-upstream" type="url" autocomplete="off" maxlength="2048" placeholder="https://emby.example.com">
+                  <small class="field-status">可以留空，仅填写协议、域名和可选端口</small>
+                </div>
+                <div>
+                  <label for="runtime-allowed-upstreams">允许上游域名</label>
+                  <textarea id="runtime-allowed-upstreams" rows="3" maxlength="8192" placeholder="emby.example.com&#10;*.media.example.com"></textarea>
+                  <small class="field-status">每行一个域名、通配域名或域名:端口</small>
+                </div>
+                <fieldset class="runtime-toggles runtime-wide-field">
+                  <legend>代理行为</legend>
+                  <label class="toggle-control"><input id="runtime-public-proxy" type="checkbox"><span aria-hidden="true"></span><b>通用反代</b></label>
+                  <label class="toggle-control"><input id="runtime-pass-ip" type="checkbox"><span aria-hidden="true"></span><b>传递客户端 IP</b></label>
+                  <label class="toggle-control"><input id="runtime-disable-cache" type="checkbox"><span aria-hidden="true"></span><b>禁用响应缓存</b></label>
+                </fieldset>
+                <div class="runtime-number-grid runtime-wide-field">
+                  <div><label for="runtime-rewrite-mb">响应重写上限</label><div class="unit-input"><input id="runtime-rewrite-mb" type="number" min="1" max="64" required><span>MiB</span></div></div>
+                  <div><label for="runtime-dns-ttl">DNS 缓存</label><div class="unit-input"><input id="runtime-dns-ttl" type="number" min="1" max="3600" required><span>秒</span></div></div>
+                  <div><label for="runtime-dial-timeout">连接超时</label><div class="unit-input"><input id="runtime-dial-timeout" type="number" min="1" max="120" required><span>秒</span></div></div>
+                  <div><label for="runtime-response-timeout">响应头超时</label><div class="unit-input"><input id="runtime-response-timeout" type="number" min="1" max="600" required><span>秒</span></div></div>
+                  <div><label for="runtime-global-limit">全局并发</label><input id="runtime-global-limit" type="number" min="1" max="4096" required></div>
+                  <div><label for="runtime-ip-limit">单 IP 并发</label><input id="runtime-ip-limit" type="number" min="1" max="4096" required></div>
+                </div>
+                <p id="runtime-config-error" class="form-error runtime-wide-field" role="alert" hidden></p>
+                <div class="form-actions runtime-wide-field">
+                  <button class="primary-button compact" type="submit"><i data-lucide="save"></i><span>保存并应用</span></button>
+                </div>
+              </form>
+            </section>
             <section class="data-section telegram-section">
               <div class="section-heading"><div><h2>Telegram 日报</h2><p>北京时间每日发送</p></div><label class="toggle-control"><input id="telegram-enabled" type="checkbox"><span aria-hidden="true"></span><b>启用</b></label></div>
               <form id="telegram-form">
@@ -374,7 +415,7 @@
       <button type="button" data-command-view="rules" data-command-search="安全 规则 黑名单 白名单"><i data-lucide="shield-check"></i><span><strong>访问规则</strong><small>域名黑白名单策略</small></span></button>
       <button type="button" data-command-view="audit" data-command-search="审计 操作 登录 安全"><i data-lucide="list-checks"></i><span><strong>审计日志</strong><small>管理操作与登录记录</small></span></button>
       <button type="button" data-command-view="backups" data-command-search="备份 恢复 导入 数据库"><i data-lucide="database-backup"></i><span><strong>备份恢复</strong><small>自动备份与 SQLite 快照</small></span></button>
-      <button type="button" data-command-view="settings" data-command-search="设置 Telegram 密码 安全"><i data-lucide="settings"></i><span><strong>系统设置</strong><small>通知、认证与安全状态</small></span></button>
+      <button type="button" data-command-view="settings" data-command-search="设置 运行配置 上游 并发 Telegram 密码 安全"><i data-lucide="settings"></i><span><strong>系统设置</strong><small>运行参数、通知与登录安全</small></span></button>
       <span id="command-empty" class="command-empty" hidden>没有匹配的页面</span>
     </div>
   </dialog>
