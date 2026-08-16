@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Refract</title>
+  <link rel="icon" href="/_admin/assets/refract-icon.png" type="image/png">
+  <link rel="stylesheet" href="/_admin/assets/app.css?v=1.7.1-20260816">
+  <script defer src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"></script>
+  <script defer src="/_admin/assets/lucide.min.js"></script>
+  <script defer src="/_admin/assets/echarts.min.js"></script>
+  <script defer src="/_admin/assets/panel.js?v=1.7.1-20260816"></script>
+</head>
+<body class="panel-page">
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+  <div class="app-shell">
+    <button id="sidebar-scrim" class="sidebar-scrim" type="button" aria-label="关闭导航" hidden></button>
+    <aside id="sidebar" class="sidebar" aria-label="主导航">
+      <div class="sidebar-account">
+        <span class="avatar"><img src="/_admin/assets/refract-icon.png" alt=""></span>
+        <span class="account-copy"><strong id="account-name">admin</strong><small>系统管理员</small></span>
+        <button id="logout-button" class="icon-button" type="button" aria-label="退出登录" title="退出登录"><i data-lucide="log-out"></i></button>
+      </div>
+      <nav aria-label="管理导航">
+        <div class="nav-group">
+          <p class="nav-group-label">反向代理</p>
+          <button class="nav-button active" type="button" data-view="overview" title="概览"><i data-lucide="layout-dashboard"></i><span>概览</span></button>
+          <button class="nav-button" type="button" data-view="connections" title="实时连接"><i data-lucide="radio-tower"></i><span>实时连接</span></button>
+          <button class="nav-button" type="button" data-view="targets" title="后端"><i data-lucide="server"></i><span>后端</span></button>
+          <button class="nav-button" type="button" data-view="requests" title="请求"><i data-lucide="scroll-text"></i><span>请求</span></button>
+        </div>
+        <div class="nav-group">
+          <p class="nav-group-label">分析</p>
+          <button class="nav-button" type="button" data-view="reports" title="统计报表"><i data-lucide="chart-no-axes-combined"></i><span>统计报表</span></button>
+        </div>
+        <div class="nav-group">
+          <p class="nav-group-label">安全性</p>
+          <button class="nav-button" type="button" data-view="rules" title="访问规则"><i data-lucide="shield-check"></i><span>访问规则</span></button>
+          <button class="nav-button" type="button" data-view="audit" title="审计日志"><i data-lucide="list-checks"></i><span>审计日志</span></button>
+        </div>
+        <div class="nav-group">
+          <p class="nav-group-label">管理</p>
+          <button class="nav-button" type="button" data-view="backups" title="备份恢复"><i data-lucide="database-backup"></i><span>备份恢复</span></button>
+          <button class="nav-button" type="button" data-view="settings" title="系统设置"><i data-lucide="settings"></i><span>系统设置</span></button>
+        </div>
+      </nav>
+      <div class="sidebar-footer">
+        <strong>Refract</strong>
+        <span>Version 1.7.1</span>
+      </div>
+      <button id="sidebar-collapse" class="sidebar-collapse" type="button" aria-label="折叠侧栏" title="折叠侧栏" aria-expanded="true"><i data-lucide="chevron-left"></i></button>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <button id="mobile-menu-button" class="icon-button mobile-menu-button" type="button" aria-label="打开导航" title="打开导航" aria-controls="sidebar" aria-expanded="false"><i data-lucide="menu"></i></button>
+        <button id="command-button" class="command-trigger" type="button" aria-haspopup="dialog" aria-controls="command-dialog">
+          <i data-lucide="search"></i><span>搜索页面</span><kbd><span id="command-modifier">⌘</span>K</kbd>
+        </button>
+        <div class="topbar-actions">
+          <button class="icon-button" type="button" data-go-view="settings" aria-label="打开系统设置" title="系统设置"><i data-lucide="settings"></i></button>
+          <button id="full-width-button" class="icon-button" type="button" aria-label="切换全宽布局" title="切换全宽布局" aria-pressed="false"><i data-lucide="maximize-2"></i></button>
+          <button id="theme-button" class="icon-button" type="button" aria-label="切换深色模式" title="切换深色模式"><i data-lucide="moon"></i></button>
+        </div>
+      </header>
+
+      <main id="main-content" class="content" tabindex="-1">
+        <div class="page-heading">
+          <div class="page-heading-copy">
+            <span id="page-heading-icon" class="page-heading-icon"><i data-lucide="layout-dashboard"></i></span>
+            <div><h1 id="page-title">运行概览</h1><p id="page-subtitle">通用反代实时状态</p></div>
+          </div>
+          <div class="page-heading-actions">
+            <span class="service-status"><span class="status-dot"></span>网关在线</span>
+            <button id="refresh-button" class="secondary-button compact-button" type="button"><i data-lucide="refresh-cw"></i><span>刷新</span></button>
+          </div>
+        </div>
+        <section id="view-overview" class="view active" aria-labelledby="page-title">
+          <section class="data-section geography-section">
+            <div class="section-heading geography-heading">
+              <div class="heading-with-icon"><span><i data-lucide="globe-2"></i></span><div><h2>全局态势板</h2><p>实时流量、请求来源与地域峰值</p></div><span class="outline-badge">访客来源</span></div>
+              <div class="geo-heading-actions">
+                <span class="map-legend"><i></i>请求来源</span>
+                <div class="period-control" role="group" aria-label="地域统计周期">
+                  <button class="active" type="button" data-geo-period="24h" aria-pressed="true">24 小时</button>
+                  <button type="button" data-geo-period="7d" aria-pressed="false">7 天</button>
+                  <button type="button" data-geo-period="30d" aria-pressed="false">30 天</button>
+                </div>
+              </div>
+            </div>
+            <div class="dashboard-metrics">
+              <article class="live-rate"><span class="metric-icon green"><i data-lucide="upload"></i></span><div><small>实时上传</small><strong id="live-upload">0 B/s</strong><span id="live-upload-total">本次运行 0 B</span></div></article>
+              <article class="live-rate"><span class="metric-icon blue"><i data-lucide="download"></i></span><div><small>实时下载</small><strong id="live-download">0 B/s</strong><span id="live-download-total">本次运行 0 B</span></div></article>
+              <article class="metric"><span class="metric-icon green"><i data-lucide="activity"></i></span><div><small id="metric-requests-label">24 小时请求</small><strong id="metric-requests">0</strong><span id="metric-active">0 个活跃连接</span></div></article>
+              <article class="metric"><span class="metric-icon blue"><i data-lucide="arrow-up-from-line"></i></span><div><small id="metric-traffic-label">24 小时下行</small><strong id="metric-traffic">0 B</strong><span>每秒实时累加</span></div></article>
+              <article class="metric"><span class="metric-icon amber"><i data-lucide="server"></i></span><div><small id="metric-targets-label">活跃后端</small><strong id="metric-targets">0</strong><span id="metric-targets-period">最近 24 小时</span></div></article>
+              <article class="metric"><span class="metric-icon red"><i data-lucide="circle-alert"></i></span><div><small>错误请求</small><strong id="metric-errors">0</strong><span id="metric-blocked">0 次安全拦截</span></div></article>
+            </div>
+            <div class="geography-stage">
+              <div class="map-viewport">
+                <div id="geography-map" role="img" aria-label="可缩放和拖动的请求来源地图"></div>
+                <p id="geography-empty" class="map-empty">正在准备地图</p>
+                <div class="map-controls" aria-label="地图控制">
+                  <button id="map-zoom-in" class="icon-button" type="button" aria-label="放大地图" title="放大"><i data-lucide="plus"></i></button>
+                  <button id="map-zoom-out" class="icon-button" type="button" aria-label="缩小地图" title="缩小"><i data-lucide="minus"></i></button>
+                  <button id="map-reset" class="icon-button" type="button" aria-label="重置地图" title="重置视图"><i data-lucide="locate-fixed"></i></button>
+                </div>
+              </div>
+              <aside class="geo-summary" aria-label="地域统计摘要">
+                <div class="geo-summary-item"><span>已定位 IP</span><strong id="geo-located">0</strong><small id="geo-unlocated">0 个等待定位</small></div>
+                <div class="geo-summary-item"><span>覆盖地域</span><strong id="geo-regions">0</strong><small>省份与国家</small></div>
+                <div class="geo-summary-item"><span>最高下行</span><strong id="geo-peak">0 B/s</strong><small id="geo-peak-place">暂无数据</small></div>
+                <div class="geo-top-list"><h3>地域排行</h3><div id="geo-top-regions"><p class="empty-state">暂无地域数据</p></div></div>
+              </aside>
+            </div>
+            <div class="geo-table-grid">
+              <section class="geo-table-block" aria-labelledby="region-table-title">
+                <div class="geo-table-heading"><div><h3 id="region-table-title">省份与国家</h3><p>按最大下行速度排序</p></div><span id="region-table-count" class="quiet-label">0 个地域</span></div>
+                <div class="table-scroll"><table><thead><tr><th>地域</th><th>IP</th><th>请求</th><th>流量</th><th>最大下行</th></tr></thead><tbody id="regions-table"></tbody></table></div>
+                <p id="regions-empty" class="empty-state">暂无地域数据</p>
+              </section>
+              <section class="geo-table-block" aria-labelledby="ip-table-title">
+                <div class="geo-table-heading"><div><h3 id="ip-table-title">IP 峰值</h3><p>合并同一 IP 的并发下行</p></div><span id="ip-table-count" class="quiet-label">0 个 IP</span></div>
+                <div class="table-scroll"><table><thead><tr><th>IP</th><th>位置</th><th>请求</th><th>最大下行</th></tr></thead><tbody id="geo-ips-table"></tbody></table></div>
+                <p id="geo-ips-empty" class="empty-state">暂无 IP 数据</p>
+              </section>
+            </div>
+          </section>
+
+          <section class="data-section chart-section">
+            <div class="section-heading"><div><h2>流量趋势</h2><p id="overview-chart-period">最近 24 小时</p></div><span id="uptime-label" class="quiet-label">运行 0 分钟</span></div>
+            <div class="chart-wrap"><canvas id="traffic-chart" role="img" aria-label="所选周期请求与流量趋势"></canvas><p id="chart-empty" class="empty-state">暂无流量数据</p></div>
+          </section>
+
+          <div class="overview-columns">
+            <section class="data-section">
+              <div class="section-heading"><div><h2>主要后端</h2><p>最近域名与访问状态</p></div><button class="text-button" type="button" data-go-view="targets">查看全部<i data-lucide="arrow-right"></i></button></div>
+              <div id="overview-targets" class="compact-list"></div>
+            </section>
+            <section class="data-section">
+              <div class="section-heading"><div><h2>最近请求</h2><p>不记录查询参数</p></div><button class="text-button" type="button" data-go-view="requests">查看日志<i data-lucide="arrow-right"></i></button></div>
+              <div id="overview-requests" class="compact-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="view-connections" class="view" aria-labelledby="page-title">
+          <section class="data-section table-section live-connections-section">
+            <div class="section-heading"><div><h2>当前连接</h2><p>按当前下行速度排序</p></div><span id="connection-count" class="live-status-label"><i></i>0 个连接</span></div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>客户端</th><th>后端与路径</th><th>实时上传</th><th>实时下载</th><th>已传输</th><th>连接时长</th><th aria-label="操作"></th></tr></thead>
+                <tbody id="connections-table"></tbody>
+              </table>
+            </div>
+            <p id="connections-empty" class="empty-state">当前没有活动连接</p>
+          </section>
+        </section>
+
+        <section id="view-reports" class="view" aria-labelledby="page-title">
+          <section class="data-section reports-summary">
+            <div class="section-heading report-toolbar">
+              <div><h2>统计周期</h2><p id="report-period-label">最近 24 小时</p></div>
+              <div class="report-toolbar-actions">
+                <div class="period-control" role="group" aria-label="报表统计周期">
+                  <button class="active" type="button" data-report-period="24h" aria-pressed="true">24 小时</button>
+                  <button type="button" data-report-period="7d" aria-pressed="false">7 天</button>
+                  <button type="button" data-report-period="30d" aria-pressed="false">30 天</button>
+                  <button type="button" data-report-period="90d" aria-pressed="false">90 天</button>
+                </div>
+                <div class="export-control">
+                  <label class="sr-only" for="report-export-kind">导出内容</label>
+                  <select id="report-export-kind"><option value="traffic">流量趋势</option><option value="targets">后端排行</option><option value="clients">客户端排行</option><option value="regions">地域统计</option></select>
+                  <button id="report-export" class="secondary-button compact-button" type="button"><i data-lucide="download"></i><span>CSV</span></button>
+                </div>
+              </div>
+            </div>
+            <div class="report-metrics">
+              <article class="metric"><span class="metric-icon green"><i data-lucide="activity"></i></span><div><small>请求</small><strong id="report-requests">0</strong><span>所选周期</span></div></article>
+              <article class="metric"><span class="metric-icon blue"><i data-lucide="download"></i></span><div><small>下行流量</small><strong id="report-download">0 B</strong><span id="report-upload">上传 0 B</span></div></article>
+              <article class="metric"><span class="metric-icon amber"><i data-lucide="server"></i></span><div><small>后端</small><strong id="report-targets">0</strong><span>不同目标</span></div></article>
+              <article class="metric"><span class="metric-icon red"><i data-lucide="circle-alert"></i></span><div><small>错误</small><strong id="report-errors">0</strong><span id="report-error-rate">错误率 0%</span></div></article>
+            </div>
+          </section>
+          <div class="report-chart-grid">
+            <section class="data-section report-chart-section"><div class="section-heading"><div><h2>实时带宽</h2><p>最近 60 秒</p></div><span class="live-status-label"><i></i>每秒更新</span></div><div id="report-live-chart" class="echart-panel" role="img" aria-label="最近 60 秒实时上下行带宽"></div></section>
+            <section class="data-section report-chart-section"><div class="section-heading"><div><h2>流量趋势</h2><p id="report-trend-label">按小时聚合</p></div></div><div id="report-trend-chart" class="echart-panel" role="img" aria-label="所选周期流量趋势"></div></section>
+          </div>
+          <div class="report-table-grid">
+            <section class="data-section table-section"><div class="section-heading"><div><h2>后端排行</h2><p>按下行流量排序</p></div></div><div class="table-scroll"><table><thead><tr><th>后端</th><th>请求</th><th>流量</th><th>错误</th><th>平均耗时</th></tr></thead><tbody id="report-targets-table"></tbody></table></div><p id="report-targets-empty" class="empty-state">暂无后端数据</p></section>
+            <section class="data-section table-section"><div class="section-heading"><div><h2>客户端排行</h2><p>按下行流量排序</p></div></div><div class="table-scroll"><table><thead><tr><th>IP</th><th>位置</th><th>请求</th><th>流量</th><th>峰值</th></tr></thead><tbody id="report-clients-table"></tbody></table></div><p id="report-clients-empty" class="empty-state">暂无客户端数据</p></section>
+          </div>
+          <section class="data-section report-regions-section"><div class="section-heading"><div><h2>地域流量分布</h2><p>中国按省份，其他地区按国家</p></div></div><div class="report-region-layout"><div id="report-region-chart" class="echart-panel" role="img" aria-label="地域流量占比图"></div><div class="table-scroll"><table><thead><tr><th>地域</th><th>IP</th><th>流量</th><th>峰值</th></tr></thead><tbody id="report-regions-table"></tbody></table></div></div><p id="report-regions-empty" class="empty-state">暂无地域数据</p></section>
+        </section>
+
+        <section id="view-targets" class="view" aria-labelledby="page-title">
+          <section class="data-section table-section">
+            <div class="section-heading"><div><h2>后端域名</h2><p>最近 24 小时自动发现</p></div><span id="target-count" class="quiet-label">0 个后端</span></div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>后端</th><th>请求</th><th>下行流量</th><th>错误</th><th>平均耗时</th><th>最近活动</th></tr></thead>
+                <tbody id="targets-table"></tbody>
+              </table>
+            </div>
+            <p id="targets-empty" class="empty-state">暂无后端数据</p>
+          </section>
+        </section>
+
+        <section id="view-requests" class="view" aria-labelledby="page-title">
+          <section class="data-section table-section">
+            <div class="section-heading"><div><h2>请求日志</h2><p>最近 100 条脱敏记录</p></div><span id="dropped-label" class="quiet-label">无丢弃</span></div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>时间</th><th>方法</th><th>后端与路径</th><th>类型</th><th>状态</th><th>流量</th><th>耗时</th></tr></thead>
+                <tbody id="requests-table"></tbody>
+              </table>
+            </div>
+            <p id="requests-empty" class="empty-state">暂无请求记录</p>
+          </section>
+        </section>
+
+        <section id="view-rules" class="view" aria-labelledby="page-title">
+          <section class="data-section policy-control">
+            <div class="section-heading">
+              <div><h2>访问模式</h2><p id="policy-summary">关闭 · 全部域名放行</p></div>
+              <fieldset id="policy-mode" class="policy-mode">
+                <legend class="sr-only">选择域名访问模式</legend>
+                <label><input type="radio" name="policy-mode" value="off"><span>关闭</span></label>
+                <label><input type="radio" name="policy-mode" value="blacklist"><span>黑名单</span></label>
+                <label><input type="radio" name="policy-mode" value="whitelist"><span>白名单</span></label>
+              </fieldset>
+            </div>
+            <form id="rule-form" class="rule-form">
+              <div><label for="rule-domain">域名后缀</label><input id="rule-domain" type="text" maxlength="253" placeholder="example.com"></div>
+              <button id="rule-add" class="primary-button compact rule-add" type="submit"><i data-lucide="plus"></i><span>选择模式后添加</span></button>
+            </form>
+            <p id="rule-error" class="form-error inline-error" role="alert" hidden></p>
+          </section>
+          <section class="data-section table-section rules-table-section">
+            <div class="section-heading"><div><h2 id="rule-list-title">域名名单</h2><p>匹配域名自身及其子域名</p></div><span id="rule-count" class="quiet-label">0 个域名</span></div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>域名后缀</th><th>创建时间</th><th aria-label="操作"></th></tr></thead>
+                <tbody id="rules-table"></tbody>
+              </table>
+            </div>
+            <p id="rules-empty" class="empty-state">选择黑名单或白名单模式后管理域名</p>
+          </section>
+        </section>
+
+        <section id="view-audit" class="view" aria-labelledby="page-title">
+          <section class="data-section table-section audit-section">
+            <div class="section-heading"><div><h2>管理操作</h2><p>保留最近 90 天</p></div><span id="audit-count" class="quiet-label">0 条记录</span></div>
+            <div class="table-scroll"><table><thead><tr><th>时间</th><th>管理员</th><th>来源 IP</th><th>操作</th><th>资源</th><th>详情</th><th>结果</th></tr></thead><tbody id="audit-table"></tbody></table></div>
+            <p id="audit-empty" class="empty-state">暂无审计记录</p>
+          </section>
+        </section>
+
+        <section id="view-backups" class="view" aria-labelledby="page-title">
+          <div class="backup-settings-grid">
+            <section class="data-section backup-config-section">
+              <div class="section-heading"><div><h2>自动备份</h2><p id="backup-next-run">未安排下次备份</p></div><label class="toggle-control"><input id="backup-enabled" type="checkbox"><span aria-hidden="true"></span><b>启用</b></label></div>
+              <form id="backup-config-form" class="backup-config-form">
+                <div><label for="backup-hour">执行时间</label><select id="backup-hour"></select></div>
+                <div><label for="backup-retention">保留数量</label><input id="backup-retention" type="number" min="1" max="30" required></div>
+                <button class="primary-button compact" type="submit"><i data-lucide="save"></i><span>保存策略</span></button>
+                <p id="backup-config-error" class="form-error" role="alert" hidden></p>
+              </form>
+            </section>
+            <section class="data-section backup-actions-section">
+              <div class="section-heading"><div><h2>备份操作</h2><p>SQLite 一致性快照</p></div><i data-lucide="database-backup"></i></div>
+              <div class="backup-actions">
+                <button id="backup-create" class="primary-button compact" type="button"><i data-lucide="database-backup"></i><span>立即备份</span></button>
+                <label class="secondary-button backup-import-button" for="backup-import"><i data-lucide="upload"></i><span>导入备份</span></label>
+                <input id="backup-import" class="sr-only" type="file" accept=".sqlite,application/vnd.sqlite3">
+              </div>
+            </section>
+          </div>
+          <section class="data-section table-section backup-list-section">
+            <div class="section-heading"><div><h2>备份文件</h2><p>恢复前自动创建安全快照</p></div><span id="backup-count" class="quiet-label">0 个备份</span></div>
+            <div class="table-scroll"><table><thead><tr><th>文件</th><th>类型</th><th>大小</th><th>创建时间</th><th aria-label="操作"></th></tr></thead><tbody id="backups-table"></tbody></table></div>
+            <p id="backups-empty" class="empty-state">暂无备份文件</p>
+          </section>
+        </section>
+
+        <section id="view-settings" class="view" aria-labelledby="page-title">
+          <div class="settings-grid">
+            <section class="data-section security-status">
+              <div class="section-heading"><div><h2>安全状态</h2><p>当前强制策略</p></div><span class="security-badge"><i data-lucide="shield-check"></i>已启用</span></div>
+              <dl class="status-list">
+                <div><dt>私网与回环拦截</dt><dd><span class="status-dot"></span>开启</dd></div>
+                <div><dt>DNS 解析结果固定</dt><dd><span class="status-dot"></span>开启</dd></div>
+                <div><dt>管理会话保护</dt><dd><span class="status-dot"></span>开启</dd></div>
+                <div><dt>查询参数日志</dt><dd class="muted-status">不记录</dd></div>
+                <div><dt>安全拦截累计</dt><dd id="security-blocked">0</dd></div>
+                <div><dt>遥测队列丢弃</dt><dd id="security-dropped">0</dd></div>
+              </dl>
+            </section>
+            <section class="data-section telegram-section">
+              <div class="section-heading"><div><h2>Telegram 日报</h2><p>北京时间每日发送</p></div><label class="toggle-control"><input id="telegram-enabled" type="checkbox"><span aria-hidden="true"></span><b>启用</b></label></div>
+              <form id="telegram-form">
+                <label for="telegram-token">Bot Token</label>
+                <input id="telegram-token" type="password" autocomplete="off" maxlength="128">
+                <small id="telegram-token-status" class="field-status">尚未配置</small>
+                <label for="telegram-chat">Chat ID</label>
+                <input id="telegram-chat" type="text" autocomplete="off" maxlength="32" placeholder="-1001234567890">
+                <label for="telegram-hour">发送时间</label>
+                <select id="telegram-hour"></select>
+                <p id="telegram-error" class="form-error" role="alert" hidden></p>
+                <div class="form-actions">
+                  <button class="primary-button compact" type="submit"><i data-lucide="save"></i><span>保存配置</span></button>
+                  <button id="telegram-test" class="secondary-button" type="button"><i data-lucide="send"></i><span>测试发送</span></button>
+                </div>
+              </form>
+            </section>
+            <section class="data-section turnstile-section">
+              <div class="section-heading"><div><h2>Cloudflare 人机验证</h2><p>自动绑定当前访问域名，自测通过后才能保护登录</p></div><span id="turnstile-status" class="security-badge muted-badge"><i data-lucide="shield-off"></i>未启用</span></div>
+              <form id="turnstile-form">
+                <label for="turnstile-site-key">Site key</label>
+                <input id="turnstile-site-key" type="text" autocomplete="off" maxlength="128" placeholder="Cloudflare Turnstile site key">
+                <label for="turnstile-secret">Secret key</label>
+                <input id="turnstile-secret" type="password" autocomplete="off" maxlength="256" placeholder="留空保持已保存密钥">
+                <small id="turnstile-secret-status" class="field-status">尚未配置</small>
+                <div id="turnstile-config-widget" class="turnstile-box" hidden>
+                  <p class="turnstile-label"><i data-lucide="badge-check"></i><span>完成配置自测</span></p>
+                  <div id="turnstile-config-widget-slot"></div>
+                </div>
+                <p id="turnstile-error" class="form-error" role="alert" hidden></p>
+                <div class="form-actions turnstile-actions">
+                  <button id="turnstile-test" class="secondary-button" type="button"><i data-lucide="shield-check"></i><span>配置自测</span></button>
+                  <label class="toggle-control turnstile-toggle"><input id="turnstile-enabled" type="checkbox" disabled><span aria-hidden="true"></span><b>启用登录验证</b></label>
+                  <button class="primary-button compact" type="submit"><i data-lucide="save"></i><span>保存配置</span></button>
+                </div>
+              </form>
+            </section>
+            <section class="data-section password-section">
+              <div class="section-heading"><div><h2>修改密码</h2><p>修改后所有会话立即失效</p></div><i data-lucide="key-round"></i></div>
+              <form id="password-form">
+                <label for="current-password">当前密码</label>
+                <input id="current-password" type="password" autocomplete="current-password" required maxlength="128">
+                <label for="new-password">新密码</label>
+                <input id="new-password" type="password" autocomplete="new-password" required minlength="12" maxlength="128">
+                <label for="confirm-password">确认新密码</label>
+                <input id="confirm-password" type="password" autocomplete="new-password" required minlength="12" maxlength="128">
+                <p id="password-error" class="form-error" role="alert" hidden></p>
+                <button class="primary-button compact" type="submit"><i data-lucide="save"></i><span>更新密码</span></button>
+              </form>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+  <dialog id="command-dialog" class="command-dialog" aria-labelledby="command-title">
+    <div class="command-search">
+      <i data-lucide="search"></i>
+      <label id="command-title" class="sr-only" for="command-input">搜索页面</label>
+      <input id="command-input" type="search" autocomplete="off" placeholder="输入页面名称">
+      <button id="command-close" class="icon-button" type="button" aria-label="关闭搜索" title="关闭"><i data-lucide="x"></i></button>
+    </div>
+    <div id="command-list" class="command-list" aria-label="页面">
+      <p>页面</p>
+      <button type="button" data-command-view="overview" data-command-search="概览 仪表盘 流量 地图"><i data-lucide="layout-dashboard"></i><span><strong>运行概览</strong><small>流量、地图和实时状态</small></span></button>
+      <button type="button" data-command-view="connections" data-command-search="实时 连接 客户端 速度"><i data-lucide="radio-tower"></i><span><strong>实时连接</strong><small>当前传输与连接控制</small></span></button>
+      <button type="button" data-command-view="targets" data-command-search="后端 域名 目标"><i data-lucide="server"></i><span><strong>后端域名</strong><small>自动发现的公网目标</small></span></button>
+      <button type="button" data-command-view="requests" data-command-search="请求 日志 访问"><i data-lucide="scroll-text"></i><span><strong>请求日志</strong><small>最近的脱敏请求</small></span></button>
+      <button type="button" data-command-view="reports" data-command-search="统计 报表 图表 CSV 地域"><i data-lucide="chart-no-axes-combined"></i><span><strong>统计报表</strong><small>趋势、排行与数据导出</small></span></button>
+      <button type="button" data-command-view="rules" data-command-search="安全 规则 黑名单 白名单"><i data-lucide="shield-check"></i><span><strong>访问规则</strong><small>域名黑白名单策略</small></span></button>
+      <button type="button" data-command-view="audit" data-command-search="审计 操作 登录 安全"><i data-lucide="list-checks"></i><span><strong>审计日志</strong><small>管理操作与登录记录</small></span></button>
+      <button type="button" data-command-view="backups" data-command-search="备份 恢复 导入 数据库"><i data-lucide="database-backup"></i><span><strong>备份恢复</strong><small>自动备份与 SQLite 快照</small></span></button>
+      <button type="button" data-command-view="settings" data-command-search="设置 Telegram 密码 安全"><i data-lucide="settings"></i><span><strong>系统设置</strong><small>通知、认证与安全状态</small></span></button>
+      <span id="command-empty" class="command-empty" hidden>没有匹配的页面</span>
+    </div>
+  </dialog>
+  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-message">
+    <div class="confirm-content">
+      <span id="confirm-icon" class="confirm-icon" aria-hidden="true"><i data-lucide="triangle-alert"></i></span>
+      <div class="confirm-copy">
+        <h2 id="confirm-title">确认操作</h2>
+        <p id="confirm-message"></p>
+      </div>
+    </div>
+    <div class="confirm-actions">
+      <button id="confirm-cancel" class="secondary-button" type="button">取消</button>
+      <button id="confirm-accept" class="primary-button" type="button">确认</button>
+    </div>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

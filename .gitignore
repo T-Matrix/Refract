@@ -1,0 +1,13 @@
+.DS_Store
+.env
+.idea/
+.vscode/
+*.db
+*.db-shm
+*.db-wal
+*.log
+bin/
+dist/
+coverage.out
+vps-url-gateway-v*.tar.gz
+Refract-v*.tar.gz

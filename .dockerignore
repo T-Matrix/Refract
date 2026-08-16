@@ -1,0 +1,10 @@
+.git
+.github
+.env
+*.tar.gz
+bin
+data
+design-system
+dist
+screenshots
+scripts

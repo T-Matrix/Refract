@@ -1,0 +1,72 @@
+services:
+  gateway:
+    build:
+      context: .
+    image: refract:local
+    restart: unless-stopped
+    environment:
+      LISTEN_ADDR: ":8080"
+      PUBLIC_BASE_URL: "https://${PROXY_DOMAIN}"
+      DEFAULT_UPSTREAM: "${DEFAULT_UPSTREAM:-}"
+      ALLOWED_UPSTREAMS: "${ALLOWED_UPSTREAMS:-}"
+      SIGNING_SECRET: "${SIGNING_SECRET:?set SIGNING_SECRET in .env}"
+      SIGNED_URL_TTL: "${SIGNED_URL_TTL:-24h}"
+      ALLOW_UNSIGNED_TARGETS: "${ALLOW_UNSIGNED_TARGETS:-false}"
+      ALLOW_PRIVATE_TARGETS: "${ALLOW_PRIVATE_TARGETS:-false}"
+      TRUST_PROXY_HEADERS: "true"
+      PASS_CLIENT_IP: "${PASS_CLIENT_IP:-false}"
+      DISABLE_CACHE: "${DISABLE_CACHE:-true}"
+      REWRITE_MAX_BYTES: "${REWRITE_MAX_BYTES:-8388608}"
+      DNS_CACHE_TTL: "${DNS_CACHE_TTL:-1m}"
+      DIAL_TIMEOUT: "${DIAL_TIMEOUT:-15s}"
+      RESPONSE_HEADER_TIMEOUT: "${RESPONSE_HEADER_TIMEOUT:-60s}"
+      TZ: "${TZ:-Asia/Shanghai}"
+      ADMIN_ENABLED: "${ADMIN_ENABLED:-false}"
+      ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
+      ADMIN_PASSWORD_HASH: "${ADMIN_PASSWORD_HASH:-}"
+      ADMIN_SESSION_SECRET: "${ADMIN_SESSION_SECRET:-}"
+      ADMIN_SESSION_TTL: "${ADMIN_SESSION_TTL:-12h}"
+      ADMIN_DATABASE_PATH: "/data/gateway.db"
+      ADMIN_BACKUP_DIR: "${ADMIN_BACKUP_DIR:-/data/backups}"
+      GEOIP_LOOKUP_URL: "${GEOIP_LOOKUP_URL:-https://ipwho.is/{ip}?fields=success,ip,country,country_code,region,latitude,longitude}"
+      GEOIP_LOOKUP_TIMEOUT: "${GEOIP_LOOKUP_TIMEOUT:-8s}"
+      GEOIP_LOOKUP_INTERVAL: "${GEOIP_LOOKUP_INTERVAL:-1100ms}"
+      MAX_CONCURRENT_REQUESTS: "${MAX_CONCURRENT_REQUESTS:-64}"
+      MAX_CONCURRENT_PER_IP: "${MAX_CONCURRENT_PER_IP:-12}"
+    volumes:
+      - gateway_data:/data
+    networks:
+      - gateway
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8080/_gateway/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  caddy:
+    image: caddy:2.11.4-alpine
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_healthy
+    environment:
+      PROXY_DOMAIN: "${PROXY_DOMAIN:?set PROXY_DOMAIN in .env}"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - gateway
+
+networks:
+  gateway:
+
+volumes:
+  caddy_data:
+  caddy_config:
+  gateway_data:

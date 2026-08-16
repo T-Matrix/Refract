@@ -1,0 +1,13 @@
+{$PROXY_DOMAIN} {
+	encode zstd gzip
+	header -Server
+
+	reverse_proxy gateway:8080 {
+		flush_interval 100ms
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

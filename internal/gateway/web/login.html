@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>登录 | Refract</title>
+  <link rel="icon" href="/_admin/assets/refract-icon.png" type="image/png">
+  <link rel="stylesheet" href="/_admin/assets/app.css?v=1.7.1-20260816">
+  <script defer src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"></script>
+  <script defer src="/_admin/assets/lucide.min.js"></script>
+  <script defer src="/_admin/assets/login.js?v=1.7.1-20260816"></script>
+</head>
+<body class="login-page">
+  <main class="login-shell">
+    <section class="login-frame" aria-labelledby="login-title">
+      <div class="login-brand">
+        <span class="brand-mark" aria-hidden="true"><img src="/_admin/assets/refract-icon.png" alt=""></span>
+        <div>
+          <strong>Refract</strong>
+          <span>管理控制台</span>
+        </div>
+      </div>
+      <div class="login-heading">
+        <h1 id="login-title">管理员登录</h1>
+        <p><span class="status-dot"></span>网关服务在线</p>
+      </div>
+      <form id="login-form" novalidate>
+        <label for="username">用户名</label>
+        <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="64">
+        <label for="password">密码</label>
+        <div class="password-field">
+          <input id="password" name="password" type="password" autocomplete="current-password" required maxlength="128">
+          <button id="toggle-password" class="icon-button input-action" type="button" aria-label="显示密码" title="显示密码">
+            <i data-lucide="eye"></i>
+          </button>
+        </div>
+        <div id="login-turnstile" class="turnstile-box" hidden>
+          <p class="turnstile-label"><i data-lucide="shield-check"></i><span>完成安全验证后继续</span></p>
+          <div id="login-turnstile-widget"></div>
+        </div>
+        <p id="login-error" class="form-error" role="alert" hidden></p>
+        <button id="login-button" class="primary-button" type="submit">
+          <i data-lucide="log-in"></i><span>登录</span>
+        </button>
+      </form>
+      <footer><i data-lucide="shield-check"></i><span>受保护的管理入口</span></footer>
+    </section>
+  </main>
+</body>
+</html>
