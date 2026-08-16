@@ -5,6 +5,7 @@ REPO_URL="${REFRACT_REPO_URL:-https://github.com/T-Matrix/Refract.git}"
 BRANCH="${REFRACT_BRANCH:-main}"
 INSTALL_DIR="${REFRACT_INSTALL_DIR:-/opt/refract}"
 COMPOSE_VERSION="${REFRACT_COMPOSE_VERSION:-v5.4.0}"
+RELEASE_BASE_URL="${REFRACT_RELEASE_BASE_URL:-https://github.com/T-Matrix/Refract/releases/latest/download}"
 
 domain="${REFRACT_DOMAIN:-}"
 upstream="${REFRACT_UPSTREAM:-}"
@@ -34,6 +35,7 @@ Refract 一键部署脚本
 
 环境变量：
   REFRACT_REPO_URL、REFRACT_BRANCH、REFRACT_INSTALL_DIR、REFRACT_COMPOSE_VERSION
+  REFRACT_RELEASE_BASE_URL
   REFRACT_DOMAIN、REFRACT_UPSTREAM、REFRACT_ALLOWED_UPSTREAMS
   REFRACT_ADMIN_USER、REFRACT_PUBLIC_PROXY、REFRACT_ALLOW_PRIVATE_TARGETS
 
@@ -226,8 +228,79 @@ valid_admin_user() {
     printf '%s' "$1" | grep -Eq '^[A-Za-z0-9_.@-]{1,64}$'
 }
 
+legacy_systemd_install() {
+    [ "$INSTALL_DIR" = "/opt/refract" ] &&
+        [ ! -f "$INSTALL_DIR/.env" ] &&
+        [ -x /opt/vps-url-gateway/vps-url-gateway ] &&
+        [ -f /etc/vps-url-gateway.env ] &&
+        [ -f /etc/systemd/system/vps-url-gateway.service ] &&
+        command -v systemctl >/dev/null 2>&1
+}
+
+update_legacy_systemd() {
+    legacy_dir=/opt/vps-url-gateway
+    legacy_binary="$legacy_dir/vps-url-gateway"
+    legacy_arch="$(uname -m)"
+    case "$legacy_arch" in
+        x86_64|amd64) legacy_asset=refract-linux-amd64 ;;
+        aarch64|arm64) legacy_asset=refract-linux-arm64 ;;
+        *) fail "暂不支持当前 CPU 架构的旧版更新：$legacy_arch" ;;
+    esac
+
+    legacy_work="$(mktemp -d)"
+    trap 'rm -rf "$legacy_work"' 0 1 2 15
+    say "检测到旧版 systemd 部署，下载最新 Release"
+    curl -fsSL "$RELEASE_BASE_URL/$legacy_asset" -o "$legacy_work/$legacy_asset"
+    curl -fsSL "$RELEASE_BASE_URL/SHA256SUMS.txt" -o "$legacy_work/SHA256SUMS.txt"
+    legacy_expected="$(awk -v name="$legacy_asset" '$2 == name || $2 == ("*" name) {print $1; exit}' "$legacy_work/SHA256SUMS.txt")"
+    legacy_actual="$(openssl dgst -sha256 "$legacy_work/$legacy_asset" | awk '{print $NF}')"
+    if [ -z "$legacy_expected" ] || [ "$legacy_actual" != "$legacy_expected" ]; then
+        fail "Refract Release 校验失败"
+    fi
+
+    legacy_stamp="$(date +%Y%m%d-%H%M%S)"
+    legacy_backup="$legacy_dir/deploy-backups/auto-$legacy_stamp"
+    mkdir -m 0700 -p "$legacy_backup"
+    cp -p "$legacy_binary" "$legacy_backup/vps-url-gateway"
+    install -m 0755 "$legacy_work/$legacy_asset" "$legacy_binary.next"
+
+    say "更新旧版服务"
+    systemctl stop vps-url-gateway.service
+    if ! mv "$legacy_binary.next" "$legacy_binary" || ! systemctl start vps-url-gateway.service; then
+        cp -p "$legacy_backup/vps-url-gateway" "$legacy_binary"
+        systemctl start vps-url-gateway.service || true
+        fail "旧版服务启动失败，已恢复原二进制"
+    fi
+
+    legacy_attempt=0
+    until curl -fsS http://127.0.0.1:8080/_gateway/health >/dev/null 2>&1; do
+        legacy_attempt=$((legacy_attempt + 1))
+        if [ "$legacy_attempt" -ge 30 ]; then
+            systemctl stop vps-url-gateway.service || true
+            cp -p "$legacy_backup/vps-url-gateway" "$legacy_binary"
+            systemctl start vps-url-gateway.service || true
+            fail "旧版服务健康检查失败，已恢复原二进制"
+        fi
+        sleep 1
+    done
+
+    if [ -d "$INSTALL_DIR/.git" ] && [ ! -e "$INSTALL_DIR/.env" ]; then
+        legacy_incomplete="$INSTALL_DIR.incomplete-$legacy_stamp"
+        mv "$INSTALL_DIR" "$legacy_incomplete"
+        warn "已将未完成的新安装保留为 $legacy_incomplete"
+    fi
+    rm -rf "$legacy_work"
+    trap - 0 1 2 15
+    say "旧版 systemd 部署已更新，配置、数据库和证书均已保留"
+}
+
 say "检查系统依赖"
 install_packages
+
+if legacy_systemd_install; then
+    update_legacy_systemd
+    exit 0
+fi
 
 if ! command -v docker >/dev/null 2>&1; then
     install_docker

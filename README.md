@@ -108,6 +108,7 @@ curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/insta
 ```
 
 脚本会执行快进更新并重建容器，现有 `.env`、SQLite 数据、面板账号和证书都会保留。
+旧版 `/opt/vps-url-gateway` systemd 部署也会被自动识别，脚本将校验最新 Release、备份当前二进制并原地更新；健康检查失败时自动回滚。
 
 ## 手动部署
 
