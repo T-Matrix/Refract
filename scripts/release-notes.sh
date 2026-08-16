@@ -7,11 +7,13 @@ usage() {
   exit 2
 }
 
-[ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+  usage
+fi
 
 tag="$1"
 version="${tag#v}"
-script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
+script_dir=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 changelog_file="${2:-${script_dir}/../CHANGELOG.md}"
 
 if [ ! -f "$changelog_file" ]; then
