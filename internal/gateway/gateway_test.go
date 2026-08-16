@@ -45,12 +45,13 @@ func TestParseRawTargetAcceptsEmbyPrefixedSameOriginProxyURL(t *testing.T) {
 	defer gateway.Close()
 	gateway.signer.now = func() time.Time { return time.Unix(1_800_000_000, 0) }
 
-	target := mustURL(t, "https://media.example/Videos/1/stream.mkv?token=abc")
+	target := mustURL(t, "https://media.example:443/Videos/1/stream.mkv?token=abc")
 	publicURL := gateway.signedDynamicURL(target, "https://proxy.example")
 	mangledURL := strings.Replace(publicURL, "https://proxy.example/", "https://proxy.example/embyhttps://proxy.example/", 1)
 	request := httptest.NewRequest(http.MethodGet, mangledURL, nil)
+	request.Host = "127.0.0.1:8080"
 
-	parsed, dynamic, expires, signature, err := parseRawTarget(request)
+	parsed, dynamic, expires, signature, err := parseRawTarget(request, "proxy.example")
 	if err != nil {
 		t.Fatalf("parseRawTarget() error = %v", err)
 	}
@@ -64,7 +65,7 @@ func TestParseRawTargetAcceptsEmbyPrefixedSameOriginProxyURL(t *testing.T) {
 
 func TestParseRawTargetRejectsEmbyPrefixedForeignProxyURL(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "https://proxy.example/embyhttps://attacker.example/https://media.example/video.mkv", nil)
-	target, dynamic, _, _, err := parseRawTarget(request)
+	target, dynamic, _, _, err := parseRawTarget(request, "proxy.example")
 	if err != nil {
 		t.Fatalf("parseRawTarget() error = %v", err)
 	}

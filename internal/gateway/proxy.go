@@ -209,7 +209,11 @@ func (g *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	target, dynamic, expires, signature, err := parseRawTarget(request)
+	var trustedPublicHosts []string
+	if g.cfg.PublicBaseURL != nil {
+		trustedPublicHosts = append(trustedPublicHosts, g.cfg.PublicBaseURL.Host)
+	}
+	target, dynamic, expires, signature, err := parseRawTarget(request, trustedPublicHosts...)
 	if err != nil {
 		writeGatewayError(writer, http.StatusBadRequest, "invalid target URL")
 		return

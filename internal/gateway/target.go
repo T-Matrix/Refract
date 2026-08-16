@@ -134,10 +134,10 @@ func isBlockedAddress(address netip.Addr) bool {
 	return false
 }
 
-func parseRawTarget(r *http.Request) (*url.URL, bool, string, string, error) {
+func parseRawTarget(r *http.Request, trustedPublicHosts ...string) (*url.URL, bool, string, string, error) {
 	escapedPath := strings.TrimPrefix(r.URL.EscapedPath(), "/")
 	candidate := escapedPath
-	if unwrapped, ok := unwrapEmbyClientTarget(r, candidate); ok {
+	if unwrapped, ok := unwrapEmbyClientTarget(r, candidate, trustedPublicHosts...); ok {
 		candidate = unwrapped
 	}
 	if !hasHTTPPrefix(candidate) {
@@ -165,7 +165,7 @@ func parseRawTarget(r *http.Request) (*url.URL, bool, string, string, error) {
 // Some Emby clients prepend their configured /emby base path even when a
 // playback field contains an absolute proxy URL. Accept that exact same-origin
 // form while leaving authorization and signature verification unchanged.
-func unwrapEmbyClientTarget(r *http.Request, escapedPath string) (string, bool) {
+func unwrapEmbyClientTarget(r *http.Request, escapedPath string, trustedPublicHosts ...string) (string, bool) {
 	decoded, err := url.PathUnescape(escapedPath)
 	if err != nil {
 		return escapedPath, false
@@ -187,7 +187,7 @@ func unwrapEmbyClientTarget(r *http.Request, escapedPath string) (string, bool) 
 	}
 
 	outer, err := url.Parse(outerRaw)
-	if err != nil || outer.User != nil || !sameRequestHost(outer, r.Host) {
+	if err != nil || outer.User != nil || !matchesPublicHost(outer, r.Host, trustedPublicHosts) {
 		return escapedPath, false
 	}
 	inner := strings.TrimPrefix(outer.EscapedPath(), "/")
@@ -199,6 +199,18 @@ func unwrapEmbyClientTarget(r *http.Request, escapedPath string) (string, bool) 
 		inner = decodedInner
 	}
 	return inner, true
+}
+
+func matchesPublicHost(target *url.URL, requestHost string, trustedPublicHosts []string) bool {
+	if sameRequestHost(target, requestHost) {
+		return true
+	}
+	for _, trustedHost := range trustedPublicHosts {
+		if sameRequestHost(target, trustedHost) {
+			return true
+		}
+	}
+	return false
 }
 
 func sameRequestHost(target *url.URL, requestHost string) bool {
