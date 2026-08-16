@@ -45,9 +45,8 @@ https://proxy.example.com/http://origin.example.com:8096/path
 先查看脚本，再执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/install.sh -o install-refract.sh
-less install-refract.sh
-sudo sh install-refract.sh
+bash <(curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/install.sh -o install-refract.sh
+less install-refract.sh)
 ```
 
 脚本会询问域名和默认上游，自动生成 256 位签名密钥与管理会话密钥，启动服务并等待健康检查通过。首次部署完成后访问：
