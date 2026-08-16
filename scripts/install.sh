@@ -187,7 +187,9 @@ install_compose_plugin() {
     curl -fsSL "$base_url/$asset.sha256" -o "$checksum_tmp"
     expected="$(awk '{print $1}' "$checksum_tmp")"
     actual="$(openssl dgst -sha256 "$plugin_tmp" | awk '{print $NF}')"
-    [ -n "$expected" ] && [ "$actual" = "$expected" ] || fail "Docker Compose 校验失败"
+    if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+        fail "Docker Compose 校验失败"
+    fi
 
     mkdir -p /usr/local/lib/docker/cli-plugins
     install -m 0755 "$plugin_tmp" /usr/local/lib/docker/cli-plugins/docker-compose
