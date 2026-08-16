@@ -27,11 +27,20 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Check installer syntax
-        run: sh -n scripts/install.sh
+      - name: Check shell script syntax
+        run: sh -n scripts/install.sh scripts/release-notes.sh
 
-      - name: Check installer style
-        run: shellcheck --shell=sh scripts/install.sh
+      - name: Check shell script style
+        run: shellcheck --shell=sh scripts/install.sh scripts/release-notes.sh
+
+      - name: Check release notes
+        run: |
+          version="$(sed -n 's/^var Version = "\([^"]*\)"/\1/p' internal/gateway/update.go)"
+          scripts/release-notes.sh "v${version}" > release-notes.md
+          grep -q '^## 新增功能$' release-notes.md
+          grep -q '^## 修复内容$' release-notes.md
+          grep -q '^## 一键升级$' release-notes.md
+          grep -q 'scripts/install.sh | sudo sh' release-notes.md
 
       - name: Build container
         run: docker build --tag refract:ci .
