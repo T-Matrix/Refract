@@ -201,6 +201,14 @@ func openTelemetryStore(path, username, passwordHash string) (*telemetryStore, e
 			success INTEGER NOT NULL CHECK(success IN (0,1))
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp DESC)`,
+		`CREATE TABLE IF NOT EXISTS admin_login_attempts (
+			client_ip TEXT PRIMARY KEY,
+			failures INTEGER NOT NULL CHECK(failures >= 0),
+			first_failure INTEGER NOT NULL,
+			blocked_until INTEGER NOT NULL DEFAULT 0,
+			last_seen INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_admin_login_attempts_last_seen ON admin_login_attempts(last_seen ASC)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {

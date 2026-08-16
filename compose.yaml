@@ -3,7 +3,7 @@ services:
     build:
       context: .
       args:
-        REFRACT_VERSION: "${REFRACT_VERSION:-1.9.0}"
+        REFRACT_VERSION: "${REFRACT_VERSION:-1.10.0}"
     image: refract:local
     restart: unless-stopped
     environment:

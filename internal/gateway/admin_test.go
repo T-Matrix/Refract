@@ -80,6 +80,21 @@ func loginAdmin(t *testing.T, gateway *Gateway) *http.Cookie {
 	return nil
 }
 
+func loginAdminFromIP(t *testing.T, gateway *Gateway, ip, password string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(map[string]string{"username": "admin", "password": password})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "https://proxy.test/_admin/api/login", bytes.NewReader(body))
+	request.RemoteAddr = ip + ":12345"
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "https://proxy.test")
+	recorder := httptest.NewRecorder()
+	gateway.ServeHTTP(recorder, request)
+	return recorder
+}
+
 func TestAdminRoutesRequireAuthentication(t *testing.T) {
 	gateway := newAdminTestGateway(t)
 
@@ -120,6 +135,50 @@ func TestAdminLoginRejectsCrossOriginAndIssuesSecureSession(t *testing.T) {
 	dashboard := adminRequest(t, gateway, http.MethodGet, "/_admin/api/dashboard", nil, cookie, false)
 	if dashboard.Code != http.StatusOK {
 		t.Fatalf("dashboard status=%d body=%s", dashboard.Code, dashboard.Body.String())
+	}
+}
+
+func TestAdminLoginBlocksOnlyFailingIPFor24Hours(t *testing.T) {
+	gateway := newAdminTestGateway(t)
+	blockedIP := "198.51.100.10"
+
+	for attempt := 1; attempt <= loginFailureLimit; attempt++ {
+		response := loginAdminFromIP(t, gateway, blockedIP, "incorrect password")
+		expected := http.StatusUnauthorized
+		if attempt == loginFailureLimit {
+			expected = http.StatusTooManyRequests
+		}
+		if response.Code != expected {
+			t.Fatalf("attempt %d status=%d body=%s", attempt, response.Code, response.Body.String())
+		}
+	}
+
+	blocked := loginAdminFromIP(t, gateway, blockedIP, "correct horse battery staple")
+	if blocked.Code != http.StatusTooManyRequests {
+		t.Fatalf("blocked IP status=%d body=%s", blocked.Code, blocked.Body.String())
+	}
+	retryAfter, err := time.ParseDuration(blocked.Header().Get("Retry-After") + "s")
+	if err != nil || retryAfter < 23*time.Hour || retryAfter > loginBlockDuration {
+		t.Fatalf("unexpected Retry-After %q", blocked.Header().Get("Retry-After"))
+	}
+
+	allowed := loginAdminFromIP(t, gateway, "198.51.100.11", "correct horse battery staple")
+	if allowed.Code != http.StatusOK {
+		t.Fatalf("different IP was blocked: status=%d body=%s", allowed.Code, allowed.Body.String())
+	}
+}
+
+func TestAdminClientIPUsesCloudflareAddressWhenProxyHeadersAreTrusted(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "https://proxy.test/panel", nil)
+	request.RemoteAddr = "127.0.0.1:12345"
+	request.Header.Set("X-Forwarded-For", "203.0.113.20, 203.0.113.30")
+	request.Header.Set("CF-Connecting-IP", "198.51.100.20")
+
+	if got := adminClientIP(request, true); got != "198.51.100.20" {
+		t.Fatalf("client IP=%q", got)
+	}
+	if got := adminClientIP(request, false); got != "127.0.0.1" {
+		t.Fatalf("untrusted client IP=%q", got)
 	}
 }
 

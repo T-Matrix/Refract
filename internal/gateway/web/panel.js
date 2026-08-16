@@ -6,7 +6,7 @@
     view: 'overview', dashboardTimer: null, dashboardPromise: null, liveTimer: null, liveRefreshing: false, updateTimer: null,
     policy: null, telegram: null, turnstile: null, turnstileWidget: null, turnstileToken: '', runtimeConfig: null,
     report: null, reportPeriod: '24h', reportLiveChart: null, reportTrendChart: null, reportRegionChart: null,
-    liveSeries: [], backups: null, update: null
+    liveSeries: [], backups: null, update: null, settingsSection: 'settings-security'
   };
   let confirmResolver = null;
   const viewMeta = {
@@ -19,6 +19,13 @@
     audit: ['审计日志', '管理操作与登录记录', 'list-checks'],
     backups: ['备份恢复', '自动备份与 SQLite 快照', 'database-backup'],
     settings: ['系统设置', '运行参数、通知与登录安全', 'settings']
+  };
+  const settingsMeta = {
+    'settings-security': ['安全状态', '当前生效的强制安全策略', 'shield-check'],
+    'settings-runtime': ['运行配置', '上游、代理行为、超时与并发', 'server-cog'],
+    'settings-telegram': ['Telegram 日报', '日报通知与发送测试', 'send'],
+    'settings-turnstile': ['Cloudflare 人机验证', '登录验证配置与自测', 'badge-check'],
+    'settings-password': ['修改密码', '更新管理员登录凭据', 'key-round']
   };
 
   function formatBytes(value) {
@@ -1181,12 +1188,16 @@
   async function switchView(view) {
     if (!viewMeta[view]) return;
     state.view = view;
+    if (view === 'settings') renderSettingsSection();
+    const meta = view === 'settings' ? settingsMeta[state.settingsSection] : viewMeta[view];
     document.querySelectorAll('.view').forEach((node) => node.classList.toggle('active', node.id === `view-${view}`));
-    document.querySelectorAll('.nav-button').forEach((node) => node.classList.toggle('active', node.dataset.view === view));
-    document.getElementById('page-title').textContent = viewMeta[view][0];
-    document.getElementById('page-subtitle').textContent = viewMeta[view][1];
-    document.getElementById('page-heading-icon').innerHTML = `<i data-lucide="${viewMeta[view][2]}"></i>`;
-    window.history.replaceState(null, '', `/panel#${view}`);
+    document.querySelectorAll('.nav-button[data-view]').forEach((node) => node.classList.toggle('active', node.dataset.view === view));
+    document.getElementById('settings-nav-toggle').classList.toggle('active', view === 'settings');
+    document.querySelectorAll('.nav-subbutton').forEach((node) => node.classList.toggle('active', view === 'settings' && node.dataset.settingsSection === state.settingsSection));
+    document.getElementById('page-title').textContent = meta[0];
+    document.getElementById('page-subtitle').textContent = meta[1];
+    document.getElementById('page-heading-icon').innerHTML = `<i data-lucide="${meta[2]}"></i>`;
+    window.history.replaceState(null, '', `/panel#${view === 'settings' ? state.settingsSection : view}`);
     setMobileSidebar(false);
     closeCommandPalette();
     window.scrollTo({ top: 0, behavior: 'instant' });
@@ -1205,10 +1216,31 @@
     if (view === 'audit') refreshAudit().catch(() => toast('审计日志加载失败'));
     if (view === 'backups') refreshBackups().catch(() => toast('备份列表加载失败'));
     if (view === 'settings') {
+      setSettingsMenu(true);
       refreshRuntimeConfig().catch(() => toast('运行配置加载失败'));
       api('/_admin/api/telegram').then(renderTelegram).catch(() => toast('Telegram 配置加载失败'));
       refreshTurnstile().catch(() => toast('Turnstile 配置加载失败'));
     }
+  }
+
+  function setSettingsMenu(open) {
+    const toggle = document.getElementById('settings-nav-toggle');
+    const submenu = document.getElementById('settings-subnav');
+    toggle.setAttribute('aria-expanded', String(open));
+    submenu.hidden = !open;
+  }
+
+  function renderSettingsSection() {
+    if (!settingsMeta[state.settingsSection]) state.settingsSection = 'settings-security';
+    document.querySelector('.settings-grid').classList.add('settings-filtered');
+    document.querySelectorAll('.settings-anchor').forEach((node) => { node.hidden = node.id !== state.settingsSection; });
+    document.querySelectorAll('.nav-subbutton').forEach((node) => node.classList.toggle('active', node.dataset.settingsSection === state.settingsSection));
+  }
+
+  async function openSettingsSection(section) {
+    if (!settingsMeta[section]) return;
+    state.settingsSection = section;
+    await switchView('settings');
   }
 
   let toastTimer;
@@ -1242,6 +1274,7 @@
     button.setAttribute('aria-label', collapsed ? '展开侧栏' : '折叠侧栏');
     button.setAttribute('title', collapsed ? '展开侧栏' : '折叠侧栏');
     button.innerHTML = `<i data-lucide="${collapsed ? 'chevron-right' : 'chevron-left'}"></i>`;
+    if (collapsed) setSettingsMenu(false);
     window.lucide?.createIcons();
     window.setTimeout(() => {
       if (state.geoChart && state.view === 'overview') state.geoChart.resize();
@@ -1338,7 +1371,13 @@
       if (!avatar.querySelector('img')) avatar.textContent = session.username.slice(0, 1).toUpperCase();
     } catch (failure) { return; }
 
-    document.querySelectorAll('.nav-button').forEach((button) => button.addEventListener('click', () => switchView(button.dataset.view)));
+    document.querySelectorAll('.nav-button[data-view]').forEach((button) => button.addEventListener('click', () => switchView(button.dataset.view)));
+    document.getElementById('settings-nav-toggle').addEventListener('click', () => {
+      if (document.body.classList.contains('sidebar-collapsed') && window.innerWidth > 840) setSidebarCollapsed(false);
+      const toggle = document.getElementById('settings-nav-toggle');
+      setSettingsMenu(toggle.getAttribute('aria-expanded') !== 'true');
+    });
+    document.querySelectorAll('.nav-subbutton').forEach((button) => button.addEventListener('click', () => openSettingsSection(button.dataset.settingsSection)));
     document.querySelectorAll('[data-go-view]').forEach((button) => button.addEventListener('click', () => switchView(button.dataset.goView)));
     document.getElementById('sidebar-collapse').addEventListener('click', () => setSidebarCollapsed(!document.body.classList.contains('sidebar-collapsed')));
     document.getElementById('mobile-menu-button').addEventListener('click', () => setMobileSidebar(!document.body.classList.contains('sidebar-open')));
@@ -1639,7 +1678,12 @@
       }
     });
     const initialView = window.location.hash.slice(1);
-    if (viewMeta[initialView]) await switchView(initialView);
+    if (settingsMeta[initialView]) {
+      state.settingsSection = initialView;
+      await switchView('settings');
+    } else if (viewMeta[initialView]) {
+      await switchView(initialView);
+    }
     await refresh(false);
     await refreshLive();
     refreshUpdateStatus().catch(() => {

@@ -2,6 +2,19 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的结构，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.10.0] - 2026-08-17
+
+### 新增
+
+- 系统设置改为可展开的二级菜单，每个子页面仅显示对应的设置内容。
+- 管理登录增加按客户端 IP 的防爆破保护：15 分钟内连续失败 5 次后，仅封禁该 IP 24 小时。
+
+### 安全
+
+- 登录失败与封禁状态持久化到本地 SQLite，服务重启后仍然有效。
+- 受信代理模式优先识别 Cloudflare 真实客户端 IP，防止误封前置代理节点。
+- Turnstile 验证失败不计入密码错误次数，避免验证服务异常触发 IP 封禁。
+
 ## [1.9.0] - 2026-08-17
 
 ### 新增
@@ -45,3 +58,4 @@
 [1.7.2]: https://github.com/T-Matrix/Refract/releases/tag/v1.7.2
 [1.7.1]: https://github.com/T-Matrix/Refract/releases/tag/v1.7.1
 [1.9.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.9.0
+[1.10.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.10.0

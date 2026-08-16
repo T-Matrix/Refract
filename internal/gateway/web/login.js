@@ -69,12 +69,17 @@
       body: JSON.stringify({ username: username.value.trim(), password: password.value, turnstile_token: turnstileToken })
       });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload.error || '登录失败');
+      if (!response.ok) {
+        const failure = new Error(payload.error || '登录失败');
+        failure.retryAfter = Number(response.headers.get('Retry-After')) || 0;
+        throw failure;
+      }
       window.location.replace('/panel');
     } catch (failure) {
       password.value = '';
+      const retryHours = Math.max(1, Math.ceil((failure.retryAfter || 0) / 3600));
       error.textContent = failure.message === 'invalid username or password' ? '用户名或密码错误' :
-        failure.message === 'too many login attempts' ? '尝试次数过多，请稍后再试' :
+        failure.message === 'too many login attempts' ? `该 IP 已被暂时封禁，请在约 ${retryHours} 小时后再试` :
         failure.message === 'human verification failed' ? '人机验证未通过，请重新完成验证' : '暂时无法登录';
       error.hidden = false;
       password.focus();

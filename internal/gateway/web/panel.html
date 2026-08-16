@@ -6,11 +6,11 @@
   <meta name="robots" content="noindex,nofollow">
   <title>Refract</title>
   <link rel="icon" href="/_admin/assets/refract-icon.png" type="image/png">
-  <link rel="stylesheet" href="/_admin/assets/app.css?v=1.9.0-20260817">
+  <link rel="stylesheet" href="/_admin/assets/app.css?v=1.10.0-20260817">
   <script defer src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"></script>
   <script defer src="/_admin/assets/lucide.min.js"></script>
   <script defer src="/_admin/assets/echarts.min.js"></script>
-  <script defer src="/_admin/assets/panel.js?v=1.9.0-20260817"></script>
+  <script defer src="/_admin/assets/panel.js?v=1.10.0-20260817"></script>
 </head>
 <body class="panel-page">
   <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -42,14 +42,23 @@
         <div class="nav-group">
           <p class="nav-group-label">管理</p>
           <button class="nav-button" type="button" data-view="backups" title="备份恢复"><i data-lucide="database-backup"></i><span>备份恢复</span></button>
-          <button class="nav-button" type="button" data-view="settings" title="系统设置"><i data-lucide="settings"></i><span>系统设置</span></button>
+          <div class="nav-submenu-group">
+            <button id="settings-nav-toggle" class="nav-button nav-parent" type="button" title="系统设置" aria-expanded="false" aria-controls="settings-subnav"><i data-lucide="settings"></i><span>系统设置</span><i class="nav-chevron" data-lucide="chevron-down" aria-hidden="true"></i></button>
+            <div id="settings-subnav" class="nav-subnav" hidden>
+              <button class="nav-subbutton" type="button" data-settings-section="settings-security"><i data-lucide="shield-check"></i><span>安全状态</span></button>
+              <button class="nav-subbutton" type="button" data-settings-section="settings-runtime"><i data-lucide="server-cog"></i><span>运行配置</span></button>
+              <button class="nav-subbutton" type="button" data-settings-section="settings-telegram"><i data-lucide="send"></i><span>Telegram 日报</span></button>
+              <button class="nav-subbutton" type="button" data-settings-section="settings-turnstile"><i data-lucide="badge-check"></i><span>人机验证</span></button>
+              <button class="nav-subbutton" type="button" data-settings-section="settings-password"><i data-lucide="key-round"></i><span>修改密码</span></button>
+            </div>
+          </div>
         </div>
       </nav>
       <div class="sidebar-footer">
         <button id="update-button" class="sidebar-update" type="button" disabled title="正在检查更新" aria-label="Refract 版本信息">
           <span class="sidebar-update-copy">
             <strong>Refract</strong>
-            <span class="sidebar-version-row"><span id="current-version">Version 1.9.0</span><i id="update-dot" class="update-dot" hidden></i></span>
+            <span class="sidebar-version-row"><span id="current-version">Version 1.10.0</span><i id="update-dot" class="update-dot" hidden></i></span>
           </span>
           <i id="update-icon" class="sidebar-update-icon" data-lucide="circle-arrow-up" aria-hidden="true"></i>
         </button>
@@ -291,18 +300,19 @@
 
         <section id="view-settings" class="view" aria-labelledby="page-title">
           <div class="settings-grid">
-            <section class="data-section security-status">
+            <section id="settings-security" class="data-section security-status settings-anchor">
               <div class="section-heading"><div><h2>安全状态</h2><p>当前强制策略</p></div><span class="security-badge"><i data-lucide="shield-check"></i>已启用</span></div>
               <dl class="status-list">
                 <div><dt>私网与回环拦截</dt><dd><span class="status-dot"></span>开启</dd></div>
                 <div><dt>DNS 解析结果固定</dt><dd><span class="status-dot"></span>开启</dd></div>
                 <div><dt>管理会话保护</dt><dd><span class="status-dot"></span>开启</dd></div>
+                <div><dt>登录防爆破</dt><dd><span class="status-dot"></span>5 次失败 / 封禁 24 小时</dd></div>
                 <div><dt>查询参数日志</dt><dd class="muted-status">不记录</dd></div>
                 <div><dt>安全拦截累计</dt><dd id="security-blocked">0</dd></div>
                 <div><dt>遥测队列丢弃</dt><dd id="security-dropped">0</dd></div>
               </dl>
             </section>
-            <section class="data-section runtime-config-section">
+            <section id="settings-runtime" class="data-section runtime-config-section settings-anchor">
               <div class="section-heading">
                 <div><h2>运行配置</h2><p>保存前校验并保留上一份可用配置</p></div>
                 <span id="runtime-config-status" class="security-badge muted-badge"><i data-lucide="server-cog"></i>等待加载</span>
@@ -343,7 +353,7 @@
                 </div>
               </form>
             </section>
-            <section class="data-section telegram-section">
+            <section id="settings-telegram" class="data-section telegram-section settings-anchor">
               <div class="section-heading"><div><h2>Telegram 日报</h2><p>北京时间每日发送</p></div><label class="toggle-control"><input id="telegram-enabled" type="checkbox"><span aria-hidden="true"></span><b>启用</b></label></div>
               <form id="telegram-form">
                 <label for="telegram-token">Bot Token</label>
@@ -360,7 +370,7 @@
                 </div>
               </form>
             </section>
-            <section class="data-section turnstile-section">
+            <section id="settings-turnstile" class="data-section turnstile-section settings-anchor">
               <div class="section-heading"><div><h2>Cloudflare 人机验证</h2><p>自动绑定当前访问域名，自测通过后才能保护登录</p></div><span id="turnstile-status" class="security-badge muted-badge"><i data-lucide="shield-off"></i>未启用</span></div>
               <form id="turnstile-form">
                 <label for="turnstile-site-key">Site key</label>
@@ -380,7 +390,7 @@
                 </div>
               </form>
             </section>
-            <section class="data-section password-section">
+            <section id="settings-password" class="data-section password-section settings-anchor">
               <div class="section-heading"><div><h2>修改密码</h2><p>修改后所有会话立即失效</p></div><i data-lucide="key-round"></i></div>
               <form id="password-form">
                 <label for="current-password">当前密码</label>

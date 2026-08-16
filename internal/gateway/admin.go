@@ -17,7 +17,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -34,23 +33,14 @@ type adminSession struct {
 	Expires  int64
 }
 
-type loginAttempt struct {
-	Failures     int
-	FirstFailure time.Time
-	BlockedUntil time.Time
-	LastSeen     time.Time
-}
-
 type adminServer struct {
-	gateway     *Gateway
-	store       *telemetryStore
-	username    string
-	secret      []byte
-	sessionTTL  time.Duration
-	trustProxy  bool
-	assets      http.Handler
-	loginMu     sync.Mutex
-	loginLimits map[string]loginAttempt
+	gateway    *Gateway
+	store      *telemetryStore
+	username   string
+	secret     []byte
+	sessionTTL time.Duration
+	trustProxy bool
+	assets     http.Handler
 }
 
 func newAdminServer(gateway *Gateway, store *telemetryStore, cfg Config) (*adminServer, error) {
@@ -59,14 +49,13 @@ func newAdminServer(gateway *Gateway, store *telemetryStore, cfg Config) (*admin
 		return nil, err
 	}
 	return &adminServer{
-		gateway:     gateway,
-		store:       store,
-		username:    cfg.AdminUsername,
-		secret:      append([]byte(nil), cfg.AdminSessionSecret...),
-		sessionTTL:  cfg.AdminSessionTTL,
-		trustProxy:  cfg.TrustProxyHeaders,
-		assets:      http.FileServer(http.FS(assets)),
-		loginLimits: make(map[string]loginAttempt),
+		gateway:    gateway,
+		store:      store,
+		username:   cfg.AdminUsername,
+		secret:     append([]byte(nil), cfg.AdminSessionSecret...),
+		sessionTTL: cfg.AdminSessionTTL,
+		trustProxy: cfg.TrustProxyHeaders,
+		assets:     http.FileServer(http.FS(assets)),
 	}, nil
 }
 
@@ -776,10 +765,14 @@ func (a *adminServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	client := adminClientIP(r, a.trustProxy)
-	if allowed, retry := a.allowLogin(client); !allowed {
+	retry, err := a.store.loginRetryAfter(r.Context(), client, time.Now())
+	if err != nil {
+		a.writeError(w, http.StatusServiceUnavailable, "login protection unavailable")
+		return
+	}
+	if retry > 0 {
 		a.store.RecordAudit(r.Context(), auditEntry{Username: "", ClientIP: client, Action: "session.login", Detail: "rate limited", Success: false})
-		w.Header().Set("Retry-After", strconv.Itoa(max(1, int(retry.Seconds()))))
-		a.writeError(w, http.StatusTooManyRequests, "too many login attempts")
+		a.writeLoginBlocked(w, retry)
 		return
 	}
 	var payload struct {
@@ -793,7 +786,6 @@ func (a *adminServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if a.gateway.turnstile != nil {
 		if err := a.gateway.turnstile.VerifyLogin(r.Context(), payload.TurnstileToken, client, turnstileRequestHostname(r)); err != nil {
-			a.recordLoginFailure(client)
 			a.store.RecordAudit(r.Context(), auditEntry{Username: payload.Username, ClientIP: client, Action: "session.login", Detail: "human verification failed", Success: false})
 			a.writeError(w, http.StatusForbidden, "human verification failed")
 			return
@@ -802,13 +794,28 @@ func (a *adminServer) handleLogin(w http.ResponseWriter, r *http.Request) {
 	record, err := a.store.AuthRecord(r.Context(), payload.Username)
 	if err != nil || subtle.ConstantTimeCompare([]byte(record.Username), []byte(payload.Username)) != 1 ||
 		bcrypt.CompareHashAndPassword([]byte(record.PasswordHash), []byte(payload.Password)) != nil {
-		a.recordLoginFailure(client)
-		a.store.RecordAudit(r.Context(), auditEntry{Username: payload.Username, ClientIP: client, Action: "session.login", Detail: "invalid credentials", Success: false})
+		retry, protectionErr := a.store.recordLoginFailure(r.Context(), client, time.Now())
+		detail := "invalid credentials"
+		if retry > 0 {
+			detail = "invalid credentials; blocked for 24 hours"
+		}
+		a.store.RecordAudit(r.Context(), auditEntry{Username: payload.Username, ClientIP: client, Action: "session.login", Detail: detail, Success: false})
 		time.Sleep(250 * time.Millisecond)
+		if protectionErr != nil {
+			a.writeError(w, http.StatusServiceUnavailable, "login protection unavailable")
+			return
+		}
+		if retry > 0 {
+			a.writeLoginBlocked(w, retry)
+			return
+		}
 		a.writeError(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
-	a.resetLogin(client)
+	if err := a.store.resetLoginFailures(r.Context(), client); err != nil {
+		a.writeError(w, http.StatusServiceUnavailable, "login protection unavailable")
+		return
+	}
 	token, err := a.issueSession(record)
 	if err != nil {
 		a.writeError(w, http.StatusInternalServerError, "session unavailable")
@@ -933,57 +940,9 @@ func (a *adminServer) clearCookie(w http.ResponseWriter) {
 	})
 }
 
-func (a *adminServer) allowLogin(client string) (bool, time.Duration) {
-	now := time.Now()
-	a.loginMu.Lock()
-	defer a.loginMu.Unlock()
-	a.pruneLoginAttempts(now)
-	attempt := a.loginLimits[client]
-	if now.Before(attempt.BlockedUntil) {
-		return false, attempt.BlockedUntil.Sub(now)
-	}
-	return true, 0
-}
-
-func (a *adminServer) recordLoginFailure(client string) {
-	now := time.Now()
-	a.loginMu.Lock()
-	defer a.loginMu.Unlock()
-	a.pruneLoginAttempts(now)
-	if len(a.loginLimits) >= 10000 {
-		var oldest string
-		var oldestTime time.Time
-		for key, attempt := range a.loginLimits {
-			if oldest == "" || attempt.LastSeen.Before(oldestTime) {
-				oldest, oldestTime = key, attempt.LastSeen
-			}
-		}
-		delete(a.loginLimits, oldest)
-	}
-	attempt := a.loginLimits[client]
-	if attempt.FirstFailure.IsZero() || now.Sub(attempt.FirstFailure) >= 15*time.Minute {
-		attempt = loginAttempt{FirstFailure: now}
-	}
-	attempt.Failures++
-	attempt.LastSeen = now
-	if attempt.Failures >= 5 {
-		attempt.BlockedUntil = now.Add(15 * time.Minute)
-	}
-	a.loginLimits[client] = attempt
-}
-
-func (a *adminServer) resetLogin(client string) {
-	a.loginMu.Lock()
-	delete(a.loginLimits, client)
-	a.loginMu.Unlock()
-}
-
-func (a *adminServer) pruneLoginAttempts(now time.Time) {
-	for client, attempt := range a.loginLimits {
-		if !now.Before(attempt.BlockedUntil) && now.Sub(attempt.LastSeen) > 15*time.Minute {
-			delete(a.loginLimits, client)
-		}
-	}
+func (a *adminServer) writeLoginBlocked(w http.ResponseWriter, retry time.Duration) {
+	w.Header().Set("Retry-After", strconv.Itoa(max(1, int(retry.Seconds()))))
+	a.writeError(w, http.StatusTooManyRequests, "too many login attempts")
 }
 
 func (a *adminServer) secureHeaders(w http.ResponseWriter) {
@@ -1052,6 +1011,11 @@ func turnstileRequestHostname(r *http.Request) string {
 }
 
 func adminClientIP(r *http.Request, trustProxy bool) string {
+	if trustProxy {
+		if candidate := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); net.ParseIP(candidate) != nil {
+			return candidate
+		}
+	}
 	if forwarded := r.Header.Values("X-Forwarded-For"); trustProxy && len(forwarded) > 0 {
 		parts := strings.Split(forwarded[len(forwarded)-1], ",")
 		if candidate := strings.TrimSpace(parts[len(parts)-1]); net.ParseIP(candidate) != nil {
