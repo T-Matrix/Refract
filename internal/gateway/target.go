@@ -137,6 +137,9 @@ func isBlockedAddress(address netip.Addr) bool {
 func parseRawTarget(r *http.Request) (*url.URL, bool, string, string, error) {
 	escapedPath := strings.TrimPrefix(r.URL.EscapedPath(), "/")
 	candidate := escapedPath
+	if unwrapped, ok := unwrapEmbyClientTarget(r, candidate); ok {
+		candidate = unwrapped
+	}
 	if !hasHTTPPrefix(candidate) {
 		decoded, err := url.PathUnescape(candidate)
 		if err != nil || !hasHTTPPrefix(decoded) {
@@ -157,6 +160,64 @@ func parseRawTarget(r *http.Request) (*url.URL, bool, string, string, error) {
 		return nil, true, "", "", err
 	}
 	return target, true, expires, signature, nil
+}
+
+// Some Emby clients prepend their configured /emby base path even when a
+// playback field contains an absolute proxy URL. Accept that exact same-origin
+// form while leaving authorization and signature verification unchanged.
+func unwrapEmbyClientTarget(r *http.Request, escapedPath string) (string, bool) {
+	decoded, err := url.PathUnescape(escapedPath)
+	if err != nil {
+		return escapedPath, false
+	}
+
+	var outerRaw string
+	lowerDecoded := strings.ToLower(decoded)
+	switch {
+	case strings.HasPrefix(lowerDecoded, "embyhttps://"):
+		outerRaw = decoded[len("emby"):]
+	case strings.HasPrefix(lowerDecoded, "embyhttp://"):
+		outerRaw = decoded[len("emby"):]
+	case strings.HasPrefix(lowerDecoded, "emby/https://"):
+		outerRaw = decoded[len("emby/"):]
+	case strings.HasPrefix(lowerDecoded, "emby/http://"):
+		outerRaw = decoded[len("emby/"):]
+	default:
+		return escapedPath, false
+	}
+
+	outer, err := url.Parse(outerRaw)
+	if err != nil || outer.User != nil || !sameRequestHost(outer, r.Host) {
+		return escapedPath, false
+	}
+	inner := strings.TrimPrefix(outer.EscapedPath(), "/")
+	if !hasHTTPPrefix(inner) {
+		decodedInner, decodeErr := url.PathUnescape(inner)
+		if decodeErr != nil || !hasHTTPPrefix(decodedInner) {
+			return escapedPath, false
+		}
+		inner = decodedInner
+	}
+	return inner, true
+}
+
+func sameRequestHost(target *url.URL, requestHost string) bool {
+	requestURL, err := url.Parse("//" + requestHost)
+	if err != nil || requestURL.Hostname() == "" {
+		return false
+	}
+	if !strings.EqualFold(target.Hostname(), requestURL.Hostname()) {
+		return false
+	}
+	requestPort := requestURL.Port()
+	targetPort := target.Port()
+	if requestPort == "" {
+		return targetPort == "" || targetPort == effectivePort(target)
+	}
+	if targetPort == "" {
+		return requestPort == effectivePort(target)
+	}
+	return requestPort == targetPort
 }
 
 func hasHTTPPrefix(value string) bool {

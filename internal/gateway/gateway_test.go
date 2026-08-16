@@ -40,6 +40,39 @@ func TestParseRawTargetAcceptsWholeURLPercentEncoding(t *testing.T) {
 	}
 }
 
+func TestParseRawTargetAcceptsEmbyPrefixedSameOriginProxyURL(t *testing.T) {
+	gateway := New(testConfig())
+	defer gateway.Close()
+	gateway.signer.now = func() time.Time { return time.Unix(1_800_000_000, 0) }
+
+	target := mustURL(t, "https://media.example/Videos/1/stream.mkv?token=abc")
+	publicURL := gateway.signedDynamicURL(target, "https://proxy.example")
+	mangledURL := strings.Replace(publicURL, "https://proxy.example/", "https://proxy.example/embyhttps://proxy.example/", 1)
+	request := httptest.NewRequest(http.MethodGet, mangledURL, nil)
+
+	parsed, dynamic, expires, signature, err := parseRawTarget(request)
+	if err != nil {
+		t.Fatalf("parseRawTarget() error = %v", err)
+	}
+	if !dynamic || parsed.String() != target.String() {
+		t.Fatalf("target = %v dynamic=%v", parsed, dynamic)
+	}
+	if !gateway.signer.Verify(parsed, expires, signature) {
+		t.Fatal("signature did not verify after Emby client URL normalization")
+	}
+}
+
+func TestParseRawTargetRejectsEmbyPrefixedForeignProxyURL(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "https://proxy.example/embyhttps://attacker.example/https://media.example/video.mkv", nil)
+	target, dynamic, _, _, err := parseRawTarget(request)
+	if err != nil {
+		t.Fatalf("parseRawTarget() error = %v", err)
+	}
+	if dynamic || target != nil {
+		t.Fatalf("foreign proxy wrapper was accepted: target=%v dynamic=%v", target, dynamic)
+	}
+}
+
 func TestSignedURLPreservesQueryAndRejectsTampering(t *testing.T) {
 	cfg := testConfig()
 	gateway := New(cfg)
@@ -103,6 +136,33 @@ func TestGatewayRewritesAndAuthorizesExternalRedirect(t *testing.T) {
 	_ = streamResponse.Body.Close()
 	if streamResponse.StatusCode != http.StatusOK || string(body) != "stream-data" {
 		t.Fatalf("CDN response status=%d body=%q", streamResponse.StatusCode, body)
+	}
+}
+
+func TestGatewayProxiesEmbyPrefixedSignedStreamURL(t *testing.T) {
+	stream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/Videos/1/stream.mkv" || request.URL.Query().Get("token") != "abc" {
+			t.Errorf("stream URL = %q", request.URL.String())
+		}
+		_, _ = writer.Write([]byte("stream-data"))
+	}))
+	defer stream.Close()
+
+	gateway, gatewayServer := newTestGateway(t, stream.URL)
+	defer gateway.Close()
+	defer gatewayServer.Close()
+
+	target := mustURL(t, stream.URL+"/Videos/1/stream.mkv?token=abc")
+	signedURL := gateway.signedDynamicURL(target, gatewayServer.URL)
+	mangledURL := gatewayServer.URL + "/emby" + signedURL
+	response, err := http.Get(mangledURL)
+	if err != nil {
+		t.Fatalf("Emby-prefixed stream request: %v", err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || string(body) != "stream-data" {
+		t.Fatalf("stream response status=%d body=%q", response.StatusCode, body)
 	}
 }
 
