@@ -6,11 +6,11 @@
   <meta name="robots" content="noindex,nofollow">
   <title>Refract</title>
   <link rel="icon" href="/_gateway/avatar">
-  <link rel="stylesheet" href="/_admin/assets/app.css?v=1.13.0-20260817a">
+  <link rel="stylesheet" href="/_admin/assets/app.css?v=1.14.0-20260817">
   <script defer src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"></script>
   <script defer src="/_admin/assets/lucide.min.js"></script>
   <script defer src="/_admin/assets/echarts.min.js"></script>
-  <script defer src="/_admin/assets/panel.js?v=1.13.0-20260817"></script>
+  <script defer src="/_admin/assets/panel.js?v=1.14.0-20260817"></script>
 </head>
 <body class="panel-page">
   <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -59,7 +59,7 @@
         <button id="update-button" class="sidebar-update" type="button" disabled title="正在检查更新" aria-label="Refract 版本信息">
           <span class="sidebar-update-copy">
             <strong>Refract</strong>
-            <span class="sidebar-version-row"><span id="current-version">Version 1.13.0</span><i id="update-dot" class="update-dot" hidden></i></span>
+            <span class="sidebar-version-row"><span id="current-version">Version 1.14.0</span><i id="update-dot" class="update-dot" hidden></i></span>
           </span>
           <i id="update-icon" class="sidebar-update-icon" data-lucide="circle-arrow-up" aria-hidden="true"></i>
         </button>
@@ -224,7 +224,12 @@
 
         <section id="view-requests" class="view" aria-labelledby="page-title">
           <section class="data-section table-section">
-            <div class="section-heading"><div><h2>请求日志</h2><p>最近 100 条脱敏记录</p></div><span id="dropped-label" class="quiet-label">无丢弃</span></div>
+            <div class="section-heading"><div><h2>请求日志</h2><p>按时间倒序，记录保留 7 天</p></div><div class="request-log-heading-meta"><span id="request-total-label" class="quiet-label">共 0 条</span><span id="dropped-label" class="quiet-label">无丢弃</span></div></div>
+            <div class="request-log-toolbar">
+              <div id="request-status-filters" class="request-status-filters" role="group" aria-label="按状态码筛选">
+                <button class="active" type="button" data-request-status="" aria-pressed="true"><span>全部</span><small>0</small></button>
+              </div>
+            </div>
             <div class="table-scroll">
               <table>
                 <thead><tr><th>时间</th><th>方法</th><th>后端与路径</th><th>类型</th><th>状态</th><th>流量</th><th>耗时</th></tr></thead>
@@ -232,6 +237,13 @@
               </table>
             </div>
             <p id="requests-empty" class="empty-state">暂无请求记录</p>
+            <nav class="request-pagination" aria-label="请求日志分页">
+              <span id="request-page-label" aria-live="polite">第 1 / 1 页</span>
+              <div>
+                <button id="request-page-previous" class="icon-button" type="button" aria-label="上一页" title="上一页" disabled><i data-lucide="chevron-left"></i></button>
+                <button id="request-page-next" class="icon-button" type="button" aria-label="下一页" title="下一页" disabled><i data-lucide="chevron-right"></i></button>
+              </div>
+            </nav>
           </section>
         </section>
 

@@ -128,7 +128,7 @@ func TestReleaseNotesFallBackWhenGitHubIsUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if notes.Version != normalizedVersion(Version) || !strings.Contains(notes.Notes, "品牌外观") || notes.ReleaseURL == "" {
+	if notes.Version != normalizedVersion(Version) || !strings.Contains(notes.Notes, "请求日志") || notes.ReleaseURL == "" {
 		t.Fatalf("fallback release notes=%#v", notes)
 	}
 }
@@ -240,7 +240,7 @@ func TestCurrentReleaseNotesAPIRequiresAuthenticationAndUsesFallback(t *testing.
 	cookie := loginAdmin(t, gateway)
 	response := adminRequest(t, gateway, http.MethodGet, "/_admin/api/update/notes", nil, cookie, false)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"version":"`+normalizedVersion(Version)+`"`) ||
-		!strings.Contains(response.Body.String(), "品牌外观") {
+		!strings.Contains(response.Body.String(), "请求日志") {
 		t.Fatalf("release notes status=%d body=%s", response.Code, response.Body.String())
 	}
 	write := adminRequest(t, gateway, http.MethodPost, "/_admin/api/update/notes", map[string]string{}, cookie, true)

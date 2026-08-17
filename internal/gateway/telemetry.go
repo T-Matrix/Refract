@@ -50,6 +50,20 @@ type requestLog struct {
 	DurationMS int64  `json:"duration_ms"`
 }
 
+type requestLogStatusCount struct {
+	Status int   `json:"status"`
+	Count  int64 `json:"count"`
+}
+
+type requestLogPage struct {
+	Logs       []requestLog            `json:"logs"`
+	Statuses   []requestLogStatusCount `json:"statuses"`
+	Total      int64                   `json:"total"`
+	Page       int                     `json:"page"`
+	PageSize   int                     `json:"page_size"`
+	TotalPages int                     `json:"total_pages"`
+}
+
 type targetSummary struct {
 	Host       string `json:"host"`
 	Domain     string `json:"domain"`
@@ -805,4 +819,88 @@ func (s *telemetryStore) recent(ctx context.Context, limit int, host string) ([]
 		result = append(result, item)
 	}
 	return result, rows.Err()
+}
+
+func (s *telemetryStore) requestLogPage(ctx context.Context, page, pageSize int, host string, status *int) (requestLogPage, error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	host = strings.TrimSpace(host)
+
+	statusQuery := `SELECT status,COUNT(*) FROM request_logs`
+	statusArgs := make([]any, 0, 1)
+	if host != "" {
+		statusQuery += ` WHERE host=?`
+		statusArgs = append(statusArgs, host)
+	}
+	statusQuery += ` GROUP BY status ORDER BY status`
+	statusRows, err := s.db.QueryContext(ctx, statusQuery, statusArgs...)
+	if err != nil {
+		return requestLogPage{}, err
+	}
+	statuses := make([]requestLogStatusCount, 0, 8)
+	for statusRows.Next() {
+		var item requestLogStatusCount
+		if err := statusRows.Scan(&item.Status, &item.Count); err != nil {
+			statusRows.Close()
+			return requestLogPage{}, err
+		}
+		statuses = append(statuses, item)
+	}
+	if err := statusRows.Close(); err != nil {
+		return requestLogPage{}, err
+	}
+	if err := statusRows.Err(); err != nil {
+		return requestLogPage{}, err
+	}
+
+	where := ""
+	args := make([]any, 0, 4)
+	if host != "" {
+		where = ` WHERE host=?`
+		args = append(args, host)
+	}
+	if status != nil {
+		if where == "" {
+			where = ` WHERE status=?`
+		} else {
+			where += ` AND status=?`
+		}
+		args = append(args, *status)
+	}
+
+	var total int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_logs`+where, args...).Scan(&total); err != nil {
+		return requestLogPage{}, err
+	}
+	totalPages := max(1, int((total+int64(pageSize)-1)/int64(pageSize)))
+	page = min(page, totalPages)
+	offset := (page - 1) * pageSize
+
+	query := `SELECT id,timestamp,host,scheme,method,path,category,status,bytes_in,bytes_out,duration_ms FROM request_logs` +
+		where + ` ORDER BY id DESC LIMIT ? OFFSET ?`
+	queryArgs := append(append([]any(nil), args...), pageSize, offset)
+	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return requestLogPage{}, err
+	}
+	defer rows.Close()
+	logs := make([]requestLog, 0, pageSize)
+	for rows.Next() {
+		var item requestLog
+		if err := rows.Scan(&item.ID, &item.Timestamp, &item.Host, &item.Scheme, &item.Method, &item.Path, &item.Category,
+			&item.Status, &item.BytesIn, &item.BytesOut, &item.DurationMS); err != nil {
+			return requestLogPage{}, err
+		}
+		logs = append(logs, item)
+	}
+	if err := rows.Err(); err != nil {
+		return requestLogPage{}, err
+	}
+	return requestLogPage{
+		Logs: logs, Statuses: statuses, Total: total, Page: page, PageSize: pageSize, TotalPages: totalPages,
+	}, nil
 }

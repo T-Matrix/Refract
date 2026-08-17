@@ -263,13 +263,47 @@ func (a *adminServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 			a.methodNotAllowed(w, http.MethodGet)
 			return
 		}
-		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		logs, err := a.store.recent(r.Context(), limit, r.URL.Query().Get("host"))
+		page := 1
+		if raw := r.URL.Query().Get("page"); raw != "" {
+			var err error
+			page, err = strconv.Atoi(raw)
+			if err != nil || page < 1 || page > 1000000 {
+				a.writeError(w, http.StatusBadRequest, "page must be between 1 and 1000000")
+				return
+			}
+		}
+		pageSize := 20
+		rawPageSize := r.URL.Query().Get("page_size")
+		if rawPageSize == "" {
+			rawPageSize = r.URL.Query().Get("limit")
+		}
+		if rawPageSize != "" {
+			var err error
+			pageSize, err = strconv.Atoi(rawPageSize)
+			if err != nil || pageSize < 1 || pageSize > 100 {
+				a.writeError(w, http.StatusBadRequest, "page_size must be between 1 and 100")
+				return
+			}
+		}
+		var status *int
+		if raw := r.URL.Query().Get("status"); raw != "" {
+			value, err := strconv.Atoi(raw)
+			if err != nil || value < 100 || value > 599 {
+				a.writeError(w, http.StatusBadRequest, "status must be a valid HTTP status code")
+				return
+			}
+			status = &value
+		}
+		result, err := a.store.requestLogPage(r.Context(), page, pageSize, r.URL.Query().Get("host"), status)
 		if err != nil {
 			a.writeError(w, http.StatusInternalServerError, "request logs unavailable")
 			return
 		}
-		a.writeJSON(w, http.StatusOK, map[string]any{"logs": logs, "dropped": a.store.dropped.Load()})
+		a.writeJSON(w, http.StatusOK, map[string]any{
+			"logs": result.Logs, "statuses": result.Statuses, "total": result.Total,
+			"page": result.Page, "page_size": result.PageSize, "total_pages": result.TotalPages,
+			"dropped": a.store.dropped.Load(),
+		})
 	case "/_admin/api/policy":
 		a.handlePolicy(w, r)
 	case "/_admin/api/policy/schedule":

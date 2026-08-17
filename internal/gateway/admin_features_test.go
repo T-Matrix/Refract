@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -71,6 +72,79 @@ func TestConnectionAdminAPIListsAndTerminates(t *testing.T) {
 	case <-requestContext.Done():
 	case <-time.After(time.Second):
 		t.Fatal("admin termination did not cancel the connection")
+	}
+}
+
+func TestRequestLogsAPIPaginatesAndFiltersExactStatuses(t *testing.T) {
+	gateway := newAdminTestGateway(t)
+	cookie := loginAdmin(t, gateway)
+	now := time.Now().Unix()
+	for index := 0; index < 45; index++ {
+		status := http.StatusOK
+		switch {
+		case index >= 40:
+			status = http.StatusInternalServerError
+		case index >= 30:
+			status = 499
+		}
+		if _, err := gateway.telemetry.db.Exec(
+			`INSERT INTO request_logs(timestamp,host,scheme,method,path,category,status,bytes_in,bytes_out,duration_ms)
+			 VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			now+int64(index), "media.example", "https", http.MethodGet, fmt.Sprintf("/item/%d", index), "api", status, 0, index, 10,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	decodePage := func(path string) requestLogPage {
+		t.Helper()
+		response := adminRequest(t, gateway, http.MethodGet, path, nil, cookie, false)
+		if response.Code != http.StatusOK {
+			t.Fatalf("request logs status=%d body=%s", response.Code, response.Body.String())
+		}
+		var page requestLogPage
+		if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil {
+			t.Fatal(err)
+		}
+		return page
+	}
+
+	second := decodePage("/_admin/api/requests?page=2&page_size=20")
+	if second.Page != 2 || second.PageSize != 20 || second.Total != 45 || second.TotalPages != 3 || len(second.Logs) != 20 {
+		t.Fatalf("unexpected second page: %#v", second)
+	}
+	wantCounts := map[int]int64{http.StatusOK: 30, 499: 10, http.StatusInternalServerError: 5}
+	for _, item := range second.Statuses {
+		if item.Count != wantCounts[item.Status] {
+			t.Fatalf("status %d count=%d want=%d", item.Status, item.Count, wantCounts[item.Status])
+		}
+		delete(wantCounts, item.Status)
+	}
+	if len(wantCounts) != 0 {
+		t.Fatalf("missing status counts: %#v", wantCounts)
+	}
+
+	filtered := decodePage("/_admin/api/requests?page=2&page_size=4&status=499")
+	if filtered.Page != 2 || filtered.Total != 10 || filtered.TotalPages != 3 || len(filtered.Logs) != 4 {
+		t.Fatalf("unexpected filtered page: %#v", filtered)
+	}
+	for _, item := range filtered.Logs {
+		if item.Status != 499 {
+			t.Fatalf("filtered page contained status %d", item.Status)
+		}
+	}
+
+	last := decodePage("/_admin/api/requests?page=999&page_size=20")
+	if last.Page != 3 || len(last.Logs) != 5 {
+		t.Fatalf("out-of-range page was not clamped: %#v", last)
+	}
+	for _, path := range []string{
+		"/_admin/api/requests?page=0", "/_admin/api/requests?page_size=101", "/_admin/api/requests?status=99",
+	} {
+		response := adminRequest(t, gateway, http.MethodGet, path, nil, cookie, false)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("invalid query %s status=%d body=%s", path, response.Code, response.Body.String())
+		}
 	}
 }
 

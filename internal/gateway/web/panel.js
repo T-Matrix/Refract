@@ -7,7 +7,8 @@
     view: 'overview', dashboardTimer: null, dashboardPromise: null, liveTimer: null, liveRefreshing: false, updateTimer: null,
     policy: null, policyTimer: null, telegram: null, turnstile: null, turnstileWidget: null, turnstileToken: '', runtimeConfig: null,
     report: null, reportPeriod: '24h', reportLiveChart: null, reportTrendChart: null, reportRegionChart: null,
-    liveSeries: [], backups: null, update: null, currentRelease: null, branding: null, settingsSection: 'settings-security'
+    liveSeries: [], backups: null, update: null, currentRelease: null, branding: null, settingsSection: 'settings-security',
+    requestPage: 1, requestPageSize: 20, requestStatus: '', requestTotalPages: 1, requestLoading: false
   };
   let confirmResolver = null;
   const viewMeta = {
@@ -432,11 +433,58 @@
     body.replaceChildren(fragment);
   }
 
-  function renderRequests(logs, dropped) {
+  function renderRequestFilters(statuses) {
+    const container = document.getElementById('request-status-filters');
+    const items = Array.isArray(statuses) ? statuses : [];
+    const allCount = items.reduce((total, item) => total + (Number(item.count) || 0), 0);
+    const options = [{ status: '', label: '全部', count: allCount }, ...items.map((item) => ({
+      status: String(item.status), label: String(item.status), count: Number(item.count) || 0
+    }))];
+    if (state.requestStatus && !options.some((item) => item.status === state.requestStatus)) {
+      options.push({ status: state.requestStatus, label: state.requestStatus, count: 0 });
+    }
+    const fragment = document.createDocumentFragment();
+    options.forEach((option) => {
+      const active = option.status === state.requestStatus;
+      const button = el('button', active ? 'active' : '');
+      button.type = 'button';
+      button.dataset.requestStatus = option.status;
+      button.setAttribute('aria-pressed', String(active));
+      button.disabled = state.requestLoading;
+      button.append(el('span', '', option.label), el('small', '', formatNumber(option.count)));
+      fragment.append(button);
+    });
+    container.replaceChildren(fragment);
+  }
+
+  function setRequestLoading(loading) {
+    state.requestLoading = loading;
+    document.getElementById('view-requests').setAttribute('aria-busy', String(loading));
+    document.querySelectorAll('#request-status-filters button').forEach((button) => { button.disabled = loading; });
+    document.getElementById('request-page-previous').disabled = loading || state.requestPage <= 1;
+    document.getElementById('request-page-next').disabled = loading || state.requestPage >= state.requestTotalPages;
+  }
+
+  function renderRequests(payload) {
+    const logs = payload?.logs || [];
+    const dropped = Number(payload?.dropped) || 0;
     const body = document.getElementById('requests-table');
     const empty = document.getElementById('requests-empty');
+    state.requestPage = Number(payload?.page) || 1;
+    state.requestPageSize = Number(payload?.page_size) || 20;
+    state.requestTotalPages = Math.max(1, Number(payload?.total_pages) || 1);
+    renderRequestFilters(payload?.statuses);
+    document.getElementById('request-total-label').textContent = `共 ${formatNumber(payload?.total)} 条`;
     document.getElementById('dropped-label').textContent = dropped ? `${formatNumber(dropped)} 条写入丢弃` : '无丢弃';
-    if (!logs?.length) { body.replaceChildren(); empty.hidden = false; return; }
+    document.getElementById('request-page-label').textContent = `第 ${formatNumber(state.requestPage)} / ${formatNumber(state.requestTotalPages)} 页 · 每页 ${formatNumber(state.requestPageSize)} 条`;
+    document.getElementById('request-page-previous').disabled = state.requestPage <= 1;
+    document.getElementById('request-page-next').disabled = state.requestPage >= state.requestTotalPages;
+    if (!logs.length) {
+      body.replaceChildren();
+      empty.textContent = state.requestStatus ? `暂无 ${state.requestStatus} 状态记录` : '暂无请求记录';
+      empty.hidden = false;
+      return;
+    }
     empty.hidden = true;
     const fragment = document.createDocumentFragment();
     logs.forEach((log) => {
@@ -452,6 +500,22 @@
       fragment.append(row);
     });
     body.replaceChildren(fragment);
+  }
+
+  async function refreshRequests(page = state.requestPage) {
+    state.requestPage = Math.max(1, Number(page) || 1);
+    setRequestLoading(true);
+    const params = new URLSearchParams({
+      page: String(state.requestPage), page_size: String(state.requestPageSize)
+    });
+    if (state.requestStatus) params.set('status', state.requestStatus);
+    try {
+      const payload = await api(`/_admin/api/requests?${params}`);
+      renderRequests(payload);
+      return payload;
+    } finally {
+      setRequestLoading(false);
+    }
   }
 
   function renderConnections(payload) {
@@ -947,7 +1011,6 @@
     renderCompactTargets(snapshot.targets);
     renderCompactRequests(snapshot.recent);
     renderTargets(snapshot.targets);
-    renderRequests(snapshot.recent, snapshot.dropped_logs);
     if (state.view === 'overview') renderChart(snapshot.timeline);
   }
 
@@ -1345,8 +1408,7 @@
       renderPolicy(policy);
       renderGeography(geography);
       if (state.view === 'requests') {
-        const data = await api('/_admin/api/requests?limit=100');
-        renderRequests(data.logs, data.dropped);
+        await refreshRequests();
       }
       if (state.view === 'connections') await refreshConnections();
       if (state.view === 'reports') await refreshReport();
@@ -1393,7 +1455,7 @@
       renderGeographyMap();
     });
     if (view === 'connections') refreshConnections().catch(() => toast('实时连接加载失败'));
-    if (view === 'requests') api('/_admin/api/requests?limit=100').then((data) => renderRequests(data.logs, data.dropped)).catch(() => toast('日志加载失败'));
+    if (view === 'requests') refreshRequests().catch(() => toast('日志加载失败'));
     if (view === 'reports') {
       refreshReport().catch(() => toast('统计报表加载失败'));
       requestAnimationFrame(redrawReportCharts);
@@ -1697,6 +1759,18 @@
       }
     });
     document.getElementById('refresh-button').addEventListener('click', () => refresh(true));
+    document.getElementById('request-status-filters').addEventListener('click', (event) => {
+      const button = event.target.closest('button[data-request-status]');
+      if (!button || button.disabled || button.dataset.requestStatus === state.requestStatus) return;
+      state.requestStatus = button.dataset.requestStatus;
+      refreshRequests(1).catch(() => toast('日志筛选失败'));
+    });
+    document.getElementById('request-page-previous').addEventListener('click', () => {
+      if (state.requestPage > 1) refreshRequests(state.requestPage - 1).catch(() => toast('上一页加载失败'));
+    });
+    document.getElementById('request-page-next').addEventListener('click', () => {
+      if (state.requestPage < state.requestTotalPages) refreshRequests(state.requestPage + 1).catch(() => toast('下一页加载失败'));
+    });
     document.getElementById('branding-avatar-file').addEventListener('change', (event) => selectBrandingFile(event.currentTarget));
     document.getElementById('branding-avatar-save').addEventListener('click', saveBrandingAvatar);
     document.getElementById('branding-avatar-reset').addEventListener('click', resetBrandingAvatar);
