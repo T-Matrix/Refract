@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Refract 通用反向代理服务状态与访问入口。">
+    <meta name="theme-color" content="#f4f6f7">
+    <title>Refract · 通用反向代理</title>
+    <link rel="icon" type="image/png" href="/_gateway/assets/refract-icon.png">
+    <link rel="apple-touch-icon" href="/_gateway/assets/refract-icon.png">
+    <link rel="stylesheet" href="/_gateway/assets/frontend.css?v=1.12.0-20260817e">
+    <script src="/_gateway/assets/frontend.js?v=1.12.0-20260817e" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+    <div class="ambient-danmaku" id="ambient-danmaku" aria-hidden="true"></div>
+
+    <header class="site-header">
+      <div class="header-inner shell">
+        <a class="brand" href="/" aria-label="Refract 首页">
+          <img class="brand-icon" src="/_gateway/assets/refract-icon.png" alt="" width="40" height="40">
+          <span class="brand-copy">
+            <span class="brand-name">Refract</span>
+            <span class="brand-meta">通用反向代理</span>
+          </span>
+        </a>
+        <div class="nav" aria-label="页面导航">
+          <a class="nav-action admin-login" href="/login">管理员登录</a>
+          <div class="nav-action header-action" id="header-status" data-state="checking" role="status">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="header-status-label">正在检测</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main id="main-content" tabindex="-1">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-inner shell">
+          <div class="hero-copy">
+            <p class="eyebrow mono-label">
+              <span class="live-dot" aria-hidden="true"></span>
+              <span>多后端代理 · 流式传输</span>
+            </p>
+            <h1 id="hero-title">Refract</h1>
+            <p class="hero-slogan">把原始地址放在当前域名之后。</p>
+            <p class="hero-description">自动处理多后端跳转与推流链接，让 Emby 和兼容客户端始终通过同一个反代入口访问。</p>
+            <div class="hero-actions">
+              <button class="button button-primary" id="copy-entry-action" type="button">
+                <span id="copy-entry-label">复制示例</span>
+                <svg class="button-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect width="14" height="14" x="8" y="8" rx="2"></rect>
+                  <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path>
+                </svg>
+              </button>
+              <a class="button button-secondary" href="https://github.com/T-Matrix/Refract" target="_blank" rel="noreferrer">GitHub</a>
+            </div>
+            <div class="model-line mono-label" aria-label="解析目标、连接上游、流式返回">
+              <span>解析目标</span><span class="model-separator" aria-hidden="true"></span>
+              <span>连接上游</span><span class="model-separator" aria-hidden="true"></span>
+              <span>流式返回</span>
+            </div>
+          </div>
+
+          <section class="gateway-visual pointer-tilt" id="gateway-entry" data-max-tilt="5" aria-labelledby="gateway-title">
+            <div class="gateway-topline mono-label">
+              <span id="gateway-title">通用代理入口</span>
+              <span class="gateway-status" id="gateway-status" data-state="checking">检测中</span>
+            </div>
+            <div class="endpoint">
+              <span class="endpoint-method mono-label">访问格式</span>
+              <button class="endpoint-copy" id="copy-endpoint" type="button" aria-describedby="copy-feedback">
+                <code id="endpoint-value">正在生成当前域名示例…</code>
+                <span class="copy-action" aria-hidden="true">
+                  <svg class="copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect width="14" height="14" x="8" y="8" rx="2"></rect>
+                    <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path>
+                  </svg>
+                  <svg class="check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="m20 6-11 11-5-5"></path>
+                  </svg>
+                  <span class="copy-label" id="copy-label">复制</span>
+                </span>
+              </button>
+              <p class="copy-feedback" id="copy-feedback" role="status" aria-live="polite"></p>
+            </div>
+            <div class="gateway-flow mono-label" aria-label="请求链路：客户端、Refract、原始服务器">
+              <span class="flow-step">客户端</span>
+              <span class="flow-line" aria-hidden="true"></span>
+              <span class="flow-step flow-step-active">Refract</span>
+              <span class="flow-line" aria-hidden="true"></span>
+              <span class="flow-step">原始服务器</span>
+            </div>
+            <div class="gateway-bottom">
+              <dl class="gateway-facts mono-label">
+                <div class="gateway-fact"><dt>状态</dt><dd id="service-state">检测中</dd></div>
+                <div class="gateway-fact"><dt>协议</dt><dd>HTTP(S)</dd></div>
+                <div class="gateway-fact"><dt>模式</dt><dd>多后端</dd></div>
+                <div class="gateway-fact"><dt>版本</dt><dd id="gateway-version">--</dd></div>
+              </dl>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="capability-band" aria-label="代理能力">
+        <div class="capability-grid shell">
+          <article class="capability">
+            <span class="capability-index mono-label"><span class="capability-number">01</span><span class="capability-code">/ 通用</span></span>
+            <h2>任意公网后端</h2>
+            <p>在入口后拼接完整 HTTP 或 HTTPS 地址，不必为每个后端重复配置。</p>
+          </article>
+          <article class="capability">
+            <span class="capability-index mono-label"><span class="capability-number">02</span><span class="capability-code">/ 连续</span></span>
+            <h2>推流地址跟随</h2>
+            <p>重写跨域跳转、播放清单和媒体地址，播放过程保持在当前入口。</p>
+          </article>
+          <article class="capability">
+            <span class="capability-index mono-label"><span class="capability-number">03</span><span class="capability-code">/ 公平</span></span>
+            <h2>共享带宽保护</h2>
+            <p>并发控制与单 IP 聚合限速共同保护出口，避免单个客户端占满带宽。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="format-band" aria-labelledby="format-title">
+        <div class="format-inner shell">
+          <div>
+            <p class="mono-label">Address format</p>
+            <h2 id="format-title">一个入口，多个原始服务器</h2>
+          </div>
+          <code><span id="origin-label">https://当前域名</span>/<strong>https://原始服务器地址</strong></code>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="footer-inner shell">
+        <span>Refract</span>
+        <span>© <span id="current-year">2026</span> 通用反向代理</span>
+      </div>
+    </footer>
+  </body>
+</html>

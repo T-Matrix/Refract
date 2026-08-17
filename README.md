@@ -14,11 +14,14 @@ https://proxy.example.com/http://origin.example.com:8096/path
 
 它同时提供完整的中文管理面板，用于实时流量、连接、地域、访问规则、通知、审计和备份管理。
 
+直接访问部署域名的根路径会显示 Refract 公共展示页。页面动态读取部署配置中的公开入口地址，访客可以复制代理示例，管理员可从右上角进入 `/login`。
+
 ![Refract 管理面板](screenshots/refract-openflare-desktop.png)
 
 ## 核心能力
 
 - 通用 HTTP/HTTPS 代理，保留任意方法、请求体和原始查询参数顺序。
+- 根路径公共展示页、实时服务状态和基于部署入口地址生成的一键复制示例。
 - WebSocket、Range / If-Range 和流式响应透传。
 - 自动改写 `Location`、`Content-Location`、`Refresh`、Emby JSON 和 HLS 播放列表 URL。
 - 自动发现的推流域名由服务端签名，无需逐个手工添加 CDN 域名。

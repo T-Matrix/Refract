@@ -207,11 +207,20 @@ func (g *Gateway) Close() {
 }
 
 func (g *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	if servePublicFrontend(writer, request) {
+		return
+	}
 	if g.admin != nil && g.admin.Handle(writer, request) {
 		return
 	}
 	if request.URL.Path == "/_gateway/health" {
-		writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "version": normalizedVersion(Version)})
+		publicBaseURL := ""
+		if g.cfg.PublicBaseURL != nil {
+			publicBaseURL = strings.TrimRight(g.cfg.PublicBaseURL.String(), "/")
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{
+			"ok": true, "version": normalizedVersion(Version), "public_base_url": publicBaseURL,
+		})
 		return
 	}
 	if request.Method == http.MethodOptions {

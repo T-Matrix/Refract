@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -144,9 +146,18 @@ func TestDownloadReleaseVerifiesBinaryChecksum(t *testing.T) {
 func TestUpdateAPIRequiresAuthenticationAndSameOrigin(t *testing.T) {
 	gateway := newAdminTestGateway(t)
 	cookie := loginAdmin(t, gateway)
+	parts := versionPattern.FindStringSubmatch(Version)
+	if len(parts) != 4 {
+		t.Fatalf("invalid current version %q", Version)
+	}
+	patch, err := strconv.Atoi(parts[3])
+	if err != nil {
+		t.Fatal(err)
+	}
+	latestVersion := fmt.Sprintf("%s.%s.%d", parts[1], parts[2], patch+1)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(writer).Encode(latestRelease{
-			TagName: "v1.11.1",
+			TagName: "v" + latestVersion,
 			Assets:  []releaseAsset{{Name: "refract-linux-" + runtime.GOARCH}, {Name: "SHA256SUMS.txt"}},
 		})
 	}))
@@ -164,7 +175,7 @@ func TestUpdateAPIRequiresAuthenticationAndSameOrigin(t *testing.T) {
 	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"update_available":true`) {
 		t.Fatalf("update check status=%d body=%s", status.Code, status.Body.String())
 	}
-	crossOrigin := adminRequest(t, gateway, http.MethodPost, "/_admin/api/update", map[string]string{"version": "1.11.1"}, cookie, false)
+	crossOrigin := adminRequest(t, gateway, http.MethodPost, "/_admin/api/update", map[string]string{"version": latestVersion}, cookie, false)
 	if crossOrigin.Code != http.StatusForbidden {
 		t.Fatalf("cross-origin update status=%d body=%s", crossOrigin.Code, crossOrigin.Body.String())
 	}

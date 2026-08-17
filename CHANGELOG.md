@@ -2,6 +2,22 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的结构，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.12.0] - 2026-08-17
+
+### 新增
+
+- 根路径新增 Refract 公共展示页，保留原参考页面的圆角卡片、彩色背景字幕、鼠标跟随倾斜和响应式移动端布局。
+- 展示页动态读取部署配置中的公开入口地址，可一键复制完整代理示例，并提供管理员登录入口与实时健康状态。
+
+### 修复
+
+- 根路径展示页优先于默认上游和后台跳转，避免配置默认上游后首页被代理或重定向。
+- 修复宽屏页脚下方大段空白，以及窄屏入口卡协议、模式和版本文字互相覆盖的问题。
+
+### 安全
+
+- 展示页静态资源使用独立路径、严格 CSP、同源资源策略、禁止嵌入和固定内容类型，只允许 `GET` 与 `HEAD` 请求。
+
 ## [1.11.0] - 2026-08-17
 
 ### 新增
@@ -73,3 +89,4 @@
 [1.9.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.9.0
 [1.10.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.10.0
 [1.11.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.11.0
+[1.12.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.12.0

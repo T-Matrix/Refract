@@ -25,7 +25,7 @@ import (
 const adminCookieName = "vug_admin_session"
 
 //go:embed web/*
-var adminAssets embed.FS
+var webAssets embed.FS
 
 type adminSession struct {
 	Username string
@@ -44,7 +44,7 @@ type adminServer struct {
 }
 
 func newAdminServer(gateway *Gateway, store *telemetryStore, cfg Config) (*adminServer, error) {
-	assets, err := fs.Sub(adminAssets, "web")
+	assets, err := fs.Sub(webAssets, "web")
 	if err != nil {
 		return nil, err
 	}
@@ -64,22 +64,6 @@ func (a *adminServer) Handle(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	switch {
-	case r.URL.Path == "/":
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			return false
-		}
-		a.secureHeaders(w)
-		installed, err := a.store.HasAdministrator(r.Context())
-		if err != nil {
-			http.Error(w, "admin database unavailable", http.StatusInternalServerError)
-			return true
-		}
-		location := "/login"
-		if !installed {
-			location = "/setup"
-		}
-		http.Redirect(w, r, location, http.StatusFound)
-		return true
 	case r.URL.Path == "/setup":
 		a.secureHeaders(w)
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
