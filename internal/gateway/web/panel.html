@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex,nofollow">
   <title>Refract</title>
-  <link rel="icon" href="/_admin/assets/refract-icon.png" type="image/png">
-  <link rel="stylesheet" href="/_admin/assets/app.css?v=1.12.0-20260817">
+  <link rel="icon" href="/_gateway/avatar">
+  <link rel="stylesheet" href="/_admin/assets/app.css?v=1.13.0-20260817a">
   <script defer src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"></script>
   <script defer src="/_admin/assets/lucide.min.js"></script>
   <script defer src="/_admin/assets/echarts.min.js"></script>
-  <script defer src="/_admin/assets/panel.js?v=1.12.0-20260817"></script>
+  <script defer src="/_admin/assets/panel.js?v=1.13.0-20260817"></script>
 </head>
 <body class="panel-page">
   <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -18,7 +18,7 @@
     <button id="sidebar-scrim" class="sidebar-scrim" type="button" aria-label="关闭导航" hidden></button>
     <aside id="sidebar" class="sidebar" aria-label="主导航">
       <div class="sidebar-account">
-        <span class="avatar"><img src="/_admin/assets/refract-icon.png" alt=""></span>
+        <span class="avatar"><img src="/_gateway/avatar" alt=""></span>
         <span class="account-copy"><strong id="account-name">admin</strong><small>系统管理员</small></span>
         <button id="logout-button" class="icon-button" type="button" aria-label="退出登录" title="退出登录"><i data-lucide="log-out"></i></button>
       </div>
@@ -46,6 +46,7 @@
             <button id="settings-nav-toggle" class="nav-button nav-parent" type="button" title="系统设置" aria-expanded="false" aria-controls="settings-subnav"><i data-lucide="settings"></i><span>系统设置</span><i class="nav-chevron" data-lucide="chevron-down" aria-hidden="true"></i></button>
             <div id="settings-subnav" class="nav-subnav" hidden>
               <button class="nav-subbutton" type="button" data-settings-section="settings-security"><i data-lucide="shield-check"></i><span>安全状态</span></button>
+              <button class="nav-subbutton" type="button" data-settings-section="settings-branding"><i data-lucide="image"></i><span>品牌外观</span></button>
               <button class="nav-subbutton" type="button" data-settings-section="settings-runtime"><i data-lucide="server-cog"></i><span>运行配置</span></button>
               <button class="nav-subbutton" type="button" data-settings-section="settings-telegram"><i data-lucide="send"></i><span>Telegram 日报</span></button>
               <button class="nav-subbutton" type="button" data-settings-section="settings-turnstile"><i data-lucide="badge-check"></i><span>人机验证</span></button>
@@ -58,7 +59,7 @@
         <button id="update-button" class="sidebar-update" type="button" disabled title="正在检查更新" aria-label="Refract 版本信息">
           <span class="sidebar-update-copy">
             <strong>Refract</strong>
-            <span class="sidebar-version-row"><span id="current-version">Version 1.12.0</span><i id="update-dot" class="update-dot" hidden></i></span>
+            <span class="sidebar-version-row"><span id="current-version">Version 1.13.0</span><i id="update-dot" class="update-dot" hidden></i></span>
           </span>
           <i id="update-icon" class="sidebar-update-icon" data-lucide="circle-arrow-up" aria-hidden="true"></i>
         </button>
@@ -325,6 +326,27 @@
                 <div><dt>遥测队列丢弃</dt><dd id="security-dropped">0</dd></div>
               </dl>
             </section>
+            <section id="settings-branding" class="data-section branding-section settings-anchor">
+              <div class="section-heading">
+                <div><h2>品牌外观</h2><p>自定义头像会同步显示在首页与管理入口</p></div>
+                <span id="branding-status" class="security-badge muted-badge"><i data-lucide="image"></i>默认头像</span>
+              </div>
+              <div class="branding-editor">
+                <div class="branding-preview"><img id="branding-avatar-preview" src="/_gateway/avatar" alt="当前 Refract 头像"></div>
+                <div class="branding-controls">
+                  <strong>站点头像</strong>
+                  <p>支持 PNG、JPEG 或 WebP，文件不得超过 512 KiB。</p>
+                  <div class="form-actions">
+                    <label class="secondary-button branding-file-button" for="branding-avatar-file"><i data-lucide="upload"></i><span>选择图片</span></label>
+                    <input id="branding-avatar-file" class="sr-only" type="file" accept="image/png,image/jpeg,image/webp">
+                    <button id="branding-avatar-save" class="primary-button compact" type="button" disabled><i data-lucide="save"></i><span>上传并应用</span></button>
+                    <button id="branding-avatar-reset" class="secondary-button" type="button"><i data-lucide="rotate-ccw"></i><span>恢复默认</span></button>
+                  </div>
+                  <small id="branding-file-status" class="field-status">尚未选择图片</small>
+                  <p id="branding-error" class="form-error" role="alert" hidden></p>
+                </div>
+              </div>
+            </section>
             <section id="settings-runtime" class="data-section runtime-config-section settings-anchor">
               <div class="section-heading">
                 <div><h2>运行配置</h2><p>保存前校验并保留上一份可用配置</p></div>
@@ -441,6 +463,41 @@
       <button type="button" data-command-view="backups" data-command-search="备份 恢复 导入 数据库"><i data-lucide="database-backup"></i><span><strong>备份恢复</strong><small>自动备份与 SQLite 快照</small></span></button>
       <button type="button" data-command-view="settings" data-command-search="设置 运行配置 上游 并发 Telegram 密码 安全"><i data-lucide="settings"></i><span><strong>系统设置</strong><small>运行参数、通知与登录安全</small></span></button>
       <span id="command-empty" class="command-empty" hidden>没有匹配的页面</span>
+    </div>
+  </dialog>
+  <dialog id="version-dialog" class="version-dialog" aria-labelledby="version-dialog-title">
+    <div class="version-dialog-header">
+      <span class="version-dialog-icon" aria-hidden="true"><i data-lucide="package-open"></i></span>
+      <div><h2 id="version-dialog-title">Refract 版本信息</h2><p id="version-dialog-summary">正在读取更新日志</p></div>
+      <button id="version-dialog-close" class="icon-button" type="button" aria-label="关闭版本信息" title="关闭"><i data-lucide="x"></i></button>
+    </div>
+    <div class="version-dialog-body">
+      <section class="release-notes-section" aria-labelledby="current-release-title">
+        <div class="release-notes-heading">
+          <div><span class="release-kicker">当前版本</span><h3 id="current-release-title">Refract</h3></div>
+          <span id="current-release-badge" class="outline-badge">当前</span>
+        </div>
+        <p id="current-release-date" class="release-date"></p>
+        <div id="current-release-notes" class="release-notes" aria-live="polite"><p>正在加载更新日志...</p></div>
+      </section>
+      <section id="latest-release-section" class="release-notes-section latest-release-section" aria-labelledby="latest-release-title" hidden>
+        <div class="release-notes-heading">
+          <div><span class="release-kicker">可用更新</span><h3 id="latest-release-title">Refract</h3></div>
+          <span class="security-badge update-available-badge"><i data-lucide="sparkles"></i>新版本</span>
+        </div>
+        <p id="latest-release-date" class="release-date"></p>
+        <div id="latest-release-notes" class="release-notes"></div>
+      </section>
+      <section id="update-diagnostic" class="update-diagnostic" hidden>
+        <span aria-hidden="true"><i data-lucide="wrench"></i></span>
+        <div><strong id="update-diagnostic-title">面板更新暂不可用</strong><p id="update-diagnostic-message"></p>
+          <div id="update-recovery-row" class="update-recovery-row" hidden><code id="update-recovery-command"></code><button id="copy-recovery-command" class="icon-button" type="button" aria-label="复制修复命令" title="复制命令"><i data-lucide="copy"></i></button></div>
+        </div>
+      </section>
+    </div>
+    <div class="version-dialog-actions">
+      <a id="release-page-link" class="secondary-button" href="https://github.com/T-Matrix/Refract/releases" target="_blank" rel="noreferrer"><i data-lucide="external-link"></i><span>查看 Release</span></a>
+      <button id="version-update-button" class="primary-button compact" type="button" hidden><i data-lucide="circle-arrow-up"></i><span>立即更新</span></button>
     </div>
   </dialog>
   <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-message">

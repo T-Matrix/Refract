@@ -15,6 +15,7 @@ public_proxy="${REFRACT_PUBLIC_PROXY:-false}"
 allow_private="${REFRACT_ALLOW_PRIVATE_TARGETS:-false}"
 assume_yes=0
 inferred_public_proxy=0
+repair_panel_update=0
 
 usage() {
     cat <<'EOF'
@@ -31,6 +32,7 @@ Refract 一键部署脚本
   --public-proxy           允许代理任意公网 HTTP/HTTPS 目标
   --allow-private          允许访问内网目标（高风险）
   --install-dir DIR        安装目录，默认 /opt/refract
+  --repair-panel-update    仅修复旧版 systemd 面板更新通道
   --yes                    跳过确认，适合自动化部署
   -h, --help               显示帮助
 
@@ -134,6 +136,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --yes)
             assume_yes=1
+            shift
+            ;;
+        --repair-panel-update)
+            repair_panel_update=1
             shift
             ;;
         -h|--help)
@@ -370,6 +376,25 @@ EOF
         sleep 1
     done
 }
+
+repair_legacy_panel_update() {
+    [ -x /opt/vps-url-gateway/vps-url-gateway ] || fail "未找到旧版 Refract 程序 /opt/vps-url-gateway/vps-url-gateway"
+    [ -f /etc/vps-url-gateway.env ] || fail "未找到旧版配置 /etc/vps-url-gateway.env"
+    [ -f /etc/systemd/system/vps-url-gateway.service ] || fail "未找到旧版 systemd 服务"
+    command -v systemctl >/dev/null 2>&1 || fail "系统不支持 systemd，无法安装面板维护通道"
+    if ! id vps-url-gateway >/dev/null 2>&1; then
+        fail "旧版低权限账号 vps-url-gateway 不存在，请先运行完整一键升级"
+    fi
+    install_legacy_maintenance_socket
+    systemctl is-active --quiet refract-maintenance.socket || fail "维护 Socket 未成功启动"
+    [ -S /run/refract-maintenance.sock ] || fail "维护 Socket 文件未创建"
+    say "面板更新通道已修复，现有代理配置、数据库和证书均未修改"
+}
+
+if [ "$repair_panel_update" -eq 1 ]; then
+    repair_legacy_panel_update
+    exit 0
+fi
 
 say "检查系统依赖"
 install_packages

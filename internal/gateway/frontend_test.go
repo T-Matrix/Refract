@@ -71,6 +71,18 @@ func TestPublicFrontendAssetsAreCachedAndSupportHead(t *testing.T) {
 	}
 }
 
+func TestPublicAvatarUsesEmbeddedDefaultWithoutAdmin(t *testing.T) {
+	gateway := New(testConfig())
+	defer gateway.Close()
+	request := httptest.NewRequest(http.MethodHead, "https://proxy.test/_gateway/avatar", nil)
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "image/png" ||
+		response.Header().Get("Cache-Control") != "no-store" || response.Header().Get("Content-Length") == "" || response.Body.Len() != 0 {
+		t.Fatalf("default avatar status=%d headers=%#v body=%d", response.Code, response.Header(), response.Body.Len())
+	}
+}
+
 func TestPublicFrontendAssetRejectsWrites(t *testing.T) {
 	gateway := New(testConfig())
 	defer gateway.Close()

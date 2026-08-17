@@ -7,7 +7,7 @@
     view: 'overview', dashboardTimer: null, dashboardPromise: null, liveTimer: null, liveRefreshing: false, updateTimer: null,
     policy: null, policyTimer: null, telegram: null, turnstile: null, turnstileWidget: null, turnstileToken: '', runtimeConfig: null,
     report: null, reportPeriod: '24h', reportLiveChart: null, reportTrendChart: null, reportRegionChart: null,
-    liveSeries: [], backups: null, update: null, settingsSection: 'settings-security'
+    liveSeries: [], backups: null, update: null, currentRelease: null, branding: null, settingsSection: 'settings-security'
   };
   let confirmResolver = null;
   const viewMeta = {
@@ -23,6 +23,7 @@
   };
   const settingsMeta = {
     'settings-security': ['安全状态', '当前生效的强制安全策略', 'shield-check'],
+    'settings-branding': ['品牌外观', '同步首页与管理入口的站点头像', 'image'],
     'settings-runtime': ['运行配置', '上游、代理行为、超时与并发', 'server-cog'],
     'settings-telegram': ['Telegram 日报', '日报通知与发送测试', 'send'],
     'settings-turnstile': ['Cloudflare 人机验证', '登录验证配置与自测', 'badge-check'],
@@ -102,7 +103,7 @@
     dot.hidden = !available || updating;
     button.classList.toggle('available', available && !updating);
     button.classList.toggle('updating', updating);
-    button.disabled = !available || updating;
+    button.disabled = updating;
     if (updating) {
       button.title = `正在更新到 ${status.latest_version}`;
       button.setAttribute('aria-label', button.title);
@@ -113,7 +114,7 @@
       button.title = `发现 Refract ${status.latest_version}，当前部署不支持面板更新`;
       button.setAttribute('aria-label', button.title);
     } else {
-      button.title = 'Refract 已是最新版本';
+      button.title = '查看 Refract 版本与更新日志';
       button.setAttribute('aria-label', button.title);
     }
   }
@@ -122,6 +123,156 @@
     const status = await api(`/_admin/api/update${force ? '?force=1' : ''}`);
     renderUpdateStatus(status);
     return status;
+  }
+
+  function formatReleaseDate(value) {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    return `发布于 ${date.toLocaleString('zh-CN', { hour12: false, timeZone: applicationTimeZone })}`;
+  }
+
+  function cleanReleaseText(value) {
+    return String(value || '')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/`([^`]+)`/g, '$1')
+      .trim();
+  }
+
+  function renderReleaseNotes(container, markdown, emptyMessage = '本版本没有提供更新日志。') {
+    container.replaceChildren();
+    const lines = String(markdown || '').replace(/\r/g, '').split('\n');
+    let list = null;
+    let listType = '';
+    let codeLines = null;
+    const flushCode = () => {
+      if (codeLines === null) return;
+      const pre = document.createElement('pre');
+      pre.textContent = codeLines.join('\n').trim();
+      if (pre.textContent) container.append(pre);
+      codeLines = null;
+    };
+    lines.forEach((rawLine) => {
+      const line = rawLine.trim();
+      if (line.startsWith('```')) {
+        if (codeLines === null) { list = null; codeLines = []; } else flushCode();
+        return;
+      }
+      if (codeLines !== null) { codeLines.push(rawLine); return; }
+      if (!line) { list = null; listType = ''; return; }
+      const heading = line.match(/^#{1,4}\s+(.+)$/);
+      if (heading) {
+        list = null;
+        const node = document.createElement('h4');
+        node.textContent = cleanReleaseText(heading[1]);
+        container.append(node);
+        return;
+      }
+      const unordered = line.match(/^[-*]\s+(.+)$/);
+      const ordered = line.match(/^\d+[.)]\s+(.+)$/);
+      if (unordered || ordered) {
+        const nextType = ordered ? 'ol' : 'ul';
+        if (!list || listType !== nextType) {
+          list = document.createElement(nextType);
+          listType = nextType;
+          container.append(list);
+        }
+        const item = document.createElement('li');
+        item.textContent = cleanReleaseText((unordered || ordered)[1]);
+        list.append(item);
+        return;
+      }
+      list = null;
+      listType = '';
+      const paragraph = document.createElement('p');
+      paragraph.textContent = cleanReleaseText(line);
+      container.append(paragraph);
+    });
+    flushCode();
+    if (!container.childElementCount) container.append(el('p', '', emptyMessage));
+  }
+
+  function updateDiagnosticDetails(reason) {
+    const details = {
+      maintenance_service_required: ['旧版部署缺少维护服务', '这是早期 systemd 版本升级后可能遗留的问题。运行下方命令只会补装受限维护通道并重启服务，不会修改代理配置。'],
+      native_systemd_required: ['当前部署不支持面板更新', 'Docker 部署不会把宿主机控制权限交给容器，请使用下方一键升级命令更新。原生 systemd 部署才支持面板内更新。'],
+      linux_required: ['当前系统不支持面板更新', '面板自动更新仅支持 Linux VPS。'],
+      unsupported_architecture: ['当前架构不支持面板更新', '面板自动更新仅支持 Linux amd64 与 arm64。'],
+      executable_unavailable: ['无法定位运行程序', '当前进程无法安全定位自身程序文件，请使用一键升级命令。'],
+      health_check_unavailable: ['健康检查配置不可用', '服务监听地址无法生成本机健康检查地址，请检查部署配置。'],
+      systemd_run_required: ['缺少 systemd-run', '系统缺少自动更新所需的 systemd-run，请安装完整 systemd 后重试。'],
+      release_assets_missing: ['当前 Release 不完整', '最新版缺少适用于当前架构的程序文件或 SHA256 校验清单。']
+    };
+    return details[reason] || ['面板更新暂不可用', '当前部署未通过自动更新环境检查，请使用一键升级命令。'];
+  }
+
+  function renderUpdateDiagnostic(status) {
+    const diagnostic = document.getElementById('update-diagnostic');
+    const reason = String(status.auto_update_reason || '');
+    diagnostic.hidden = !reason;
+    if (!reason) return;
+    const [title, message] = updateDiagnosticDetails(reason);
+    document.getElementById('update-diagnostic-title').textContent = title;
+    document.getElementById('update-diagnostic-message').textContent = message;
+    const command = String(status.recovery_command || '');
+    const row = document.getElementById('update-recovery-row');
+    row.hidden = !command;
+    document.getElementById('update-recovery-command').textContent = command;
+  }
+
+  function applyCurrentRelease(notes) {
+    state.currentRelease = notes;
+    const version = String(notes.version || state.update?.current_version || '');
+    document.getElementById('current-release-title').textContent = notes.name || `Refract ${version}`;
+    document.getElementById('current-release-badge').textContent = version || '当前';
+    document.getElementById('current-release-date').textContent = formatReleaseDate(notes.published_at);
+    renderReleaseNotes(document.getElementById('current-release-notes'), notes.notes);
+  }
+
+  async function openVersionDialog() {
+    const status = state.update || {};
+    const current = String(status.current_version || '');
+    const available = Boolean(status.update_available);
+    const dialog = document.getElementById('version-dialog');
+    document.getElementById('version-dialog-summary').textContent = status.updating ? `正在更新到 ${status.latest_version}` :
+      available ? `发现新版本 ${status.latest_version}` : '版本详情与官方更新日志';
+    document.getElementById('current-release-title').textContent = `Refract ${current}`;
+    document.getElementById('current-release-badge').textContent = current || '当前';
+    document.getElementById('current-release-date').textContent = '';
+    renderReleaseNotes(document.getElementById('current-release-notes'), '', '正在加载更新日志...');
+
+    const latestSection = document.getElementById('latest-release-section');
+    latestSection.hidden = !available;
+    if (available) {
+      document.getElementById('latest-release-title').textContent = status.latest_name || `Refract ${status.latest_version}`;
+      document.getElementById('latest-release-date').textContent = formatReleaseDate(status.latest_published_at);
+      renderReleaseNotes(document.getElementById('latest-release-notes'), status.latest_notes, '新版本暂未提供更新说明。');
+    }
+    renderUpdateDiagnostic(status);
+    const updateButton = document.getElementById('version-update-button');
+    updateButton.hidden = !(available && status.auto_update_supported && !status.updating);
+    const releaseLink = document.getElementById('release-page-link');
+    if (status.release_url) releaseLink.href = status.release_url;
+    window.lucide?.createIcons();
+    if (!dialog.open) dialog.showModal();
+
+    if (state.currentRelease?.version === current) {
+      applyCurrentRelease(state.currentRelease);
+      return;
+    }
+    if (status.latest_version === current && (status.latest_notes || status.latest_name)) {
+      applyCurrentRelease({
+        version: current, name: status.latest_name, notes: status.latest_notes,
+        published_at: status.latest_published_at, release_url: status.release_url
+      });
+      return;
+    }
+    try {
+      applyCurrentRelease(await api('/_admin/api/update/notes'));
+    } catch (failure) {
+      renderReleaseNotes(document.getElementById('current-release-notes'), '', '当前版本更新日志暂时无法获取。');
+    }
   }
 
   async function waitForUpdatedVersion(version) {
@@ -146,9 +297,11 @@
     const status = state.update;
     if (!status?.update_available) return;
     if (!status.auto_update_supported) {
-      toast('当前部署方式暂不支持面板自动更新');
+      toast(updateDiagnosticDetails(status.auto_update_reason)[0]);
       return;
     }
+    const versionDialog = document.getElementById('version-dialog');
+    if (versionDialog.open) versionDialog.close();
     const confirmed = await confirmAction({
       title: `更新到 Refract ${status.latest_version}`,
       message: '更新包会从官方 GitHub Release 下载并校验 SHA256。服务将短暂重启，失败时自动恢复当前版本。',
@@ -916,7 +1069,7 @@
     'telegram.settings': '修改 Telegram', 'telegram.test': '测试 Telegram',
     'backup.auto': '自动备份', 'backup.create': '创建备份', 'backup.import': '导入备份',
     'backup.restore': '恢复备份', 'backup.delete': '删除备份', 'backup.settings': '修改备份策略',
-    'system.configuration': '修改运行配置'
+    'system.configuration': '修改运行配置', 'branding.avatar': '修改站点头像'
   };
 
   function renderAudit(payload) {
@@ -1250,6 +1403,7 @@
     if (view === 'backups') refreshBackups().catch(() => toast('备份列表加载失败'));
     if (view === 'settings') {
       setSettingsMenu(true);
+      if (state.settingsSection === 'settings-branding') refreshBranding().catch(() => toast('品牌外观加载失败'));
       refreshRuntimeConfig().catch(() => toast('运行配置加载失败'));
       api('/_admin/api/telegram').then(renderTelegram).catch(() => toast('Telegram 配置加载失败'));
       refreshTurnstile().catch(() => toast('Turnstile 配置加载失败'));
@@ -1381,6 +1535,86 @@
     if (showNotice) toast('Telegram 配置已保存');
   }
 
+  function renderBranding(view) {
+    state.branding = view || { custom: false, updated_at: 0 };
+    const cacheKey = Number(state.branding.updated_at) || Date.now();
+    const avatarURL = `/_gateway/avatar?v=${cacheKey}`;
+    document.querySelectorAll('img[src^="/_gateway/avatar"]').forEach((image) => { image.src = avatarURL; });
+    document.querySelectorAll('link[rel~="icon"][href^="/_gateway/avatar"]').forEach((link) => { link.href = avatarURL; });
+    const badge = document.getElementById('branding-status');
+    badge.innerHTML = `<i data-lucide="${state.branding.custom ? 'badge-check' : 'image'}"></i>${state.branding.custom ? '自定义头像' : '默认头像'}`;
+    badge.classList.toggle('muted-badge', !state.branding.custom);
+    document.getElementById('branding-avatar-reset').disabled = !state.branding.custom;
+    window.lucide?.createIcons();
+  }
+
+  async function refreshBranding() {
+    renderBranding(await api('/_admin/api/branding'));
+  }
+
+  function selectBrandingFile(input) {
+    const file = input.files?.[0];
+    const error = document.getElementById('branding-error');
+    const status = document.getElementById('branding-file-status');
+    const save = document.getElementById('branding-avatar-save');
+    error.hidden = true;
+    save.disabled = true;
+    if (!file) {
+      status.textContent = '尚未选择图片';
+      return;
+    }
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size <= 0 || file.size > 512 * 1024) {
+      input.value = '';
+      status.textContent = '尚未选择图片';
+      error.textContent = '请选择不超过 512 KiB 的 PNG、JPEG 或 WebP 图片';
+      error.hidden = false;
+      return;
+    }
+    status.textContent = `${file.name} · ${formatBytes(file.size)}`;
+    save.disabled = false;
+  }
+
+  async function saveBrandingAvatar() {
+    const input = document.getElementById('branding-avatar-file');
+    const file = input.files?.[0];
+    if (!file) return;
+    const button = document.getElementById('branding-avatar-save');
+    const error = document.getElementById('branding-error');
+    const form = new FormData();
+    form.append('avatar', file, file.name);
+    button.disabled = true;
+    error.hidden = true;
+    try {
+      renderBranding(await api('/_admin/api/branding', { method: 'POST', body: form }));
+      input.value = '';
+      document.getElementById('branding-file-status').textContent = '头像已同步到首页与管理入口';
+      toast('站点头像已更新');
+    } catch (failure) {
+      error.textContent = '头像上传失败，请确认图片格式和文件大小';
+      error.hidden = false;
+      button.disabled = false;
+    }
+  }
+
+  async function resetBrandingAvatar() {
+    const confirmed = await confirmAction({
+      title: '恢复默认头像', message: '首页、登录页和管理面板将恢复为 Refract 默认头像。',
+      confirmLabel: '恢复默认', icon: 'rotate-ccw'
+    });
+    if (!confirmed) return;
+    const button = document.getElementById('branding-avatar-reset');
+    button.disabled = true;
+    try {
+      renderBranding(await api('/_admin/api/branding', { method: 'DELETE' }));
+      document.getElementById('branding-avatar-file').value = '';
+      document.getElementById('branding-file-status').textContent = '已恢复默认头像';
+      toast('已恢复默认头像');
+    } catch (failure) {
+      button.disabled = false;
+      toast('恢复默认头像失败');
+    }
+  }
+
   async function initialize() {
     setTheme(localStorage.getItem('gateway-theme') === 'dark' ? 'dark' : 'light');
     setSidebarCollapsed(localStorage.getItem('gateway-sidebar-collapsed') === 'true');
@@ -1415,7 +1649,17 @@
     document.getElementById('sidebar-collapse').addEventListener('click', () => setSidebarCollapsed(!document.body.classList.contains('sidebar-collapsed')));
     document.getElementById('mobile-menu-button').addEventListener('click', () => setMobileSidebar(!document.body.classList.contains('sidebar-open')));
     document.getElementById('sidebar-scrim').addEventListener('click', () => setMobileSidebar(false));
-    document.getElementById('update-button').addEventListener('click', startPanelUpdate);
+    document.getElementById('update-button').addEventListener('click', openVersionDialog);
+    document.getElementById('version-update-button').addEventListener('click', startPanelUpdate);
+    document.getElementById('version-dialog-close').addEventListener('click', () => document.getElementById('version-dialog').close());
+    document.getElementById('version-dialog').addEventListener('click', (event) => {
+      if (event.target === event.currentTarget) event.currentTarget.close();
+    });
+    document.getElementById('copy-recovery-command').addEventListener('click', async () => {
+      const command = document.getElementById('update-recovery-command').textContent;
+      try { await navigator.clipboard.writeText(command); toast('修复命令已复制'); }
+      catch (failure) { toast('复制失败，请手动选择命令'); }
+    });
     document.getElementById('full-width-button').addEventListener('click', () => setFullWidth(!document.querySelector('.workspace').classList.contains('full-width')));
     document.getElementById('command-button').addEventListener('click', openCommandPalette);
     document.getElementById('command-close').addEventListener('click', closeCommandPalette);
@@ -1453,6 +1697,9 @@
       }
     });
     document.getElementById('refresh-button').addEventListener('click', () => refresh(true));
+    document.getElementById('branding-avatar-file').addEventListener('change', (event) => selectBrandingFile(event.currentTarget));
+    document.getElementById('branding-avatar-save').addEventListener('click', saveBrandingAvatar);
+    document.getElementById('branding-avatar-reset').addEventListener('click', resetBrandingAvatar);
     document.querySelectorAll('[data-geo-period]').forEach((button) => button.addEventListener('click', async () => {
       if (button.dataset.geoPeriod === state.overviewPeriod) return;
       const previous = state.overviewPeriod;

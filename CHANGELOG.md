@@ -2,6 +2,25 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的结构，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.13.0] - 2026-08-17
+
+### 新增
+
+- 系统设置新增品牌外观，可上传 PNG、JPEG 或 WebP 头像，并同步应用到首页、登录页、安装页和管理面板。
+- 侧栏版本区域现在始终可点击，可查看当前版本更新日志；发现新版本时会同时展示新版本功能与发布时间。
+- 旧版 systemd 部署新增面板更新通道专用修复命令，不修改现有代理配置、数据库和证书。
+
+### 修复
+
+- 修复早期 systemd 版本只替换程序后缺少维护 Socket，导致面板持续提示当前部署方式不支持更新的问题。
+- 修复旧系统使用 cgroup v1 时无法识别 systemd 服务、从而误判为不支持面板更新的问题。
+- GitHub 暂时不可用时，当前版本更新日志会回退到随程序内置的内容。
+
+### 安全
+
+- 自定义头像存入 SQLite 并随备份保留，上传接口要求登录和同源请求，限制为 512 KiB 并校验真实图片格式。
+- Docker 部署继续禁止容器控制宿主机更新，原生 systemd 更新仍校验官方 Release 与 SHA256。
+
 ## [1.12.0] - 2026-08-17
 
 ### 新增
@@ -90,3 +109,4 @@
 [1.10.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.10.0
 [1.11.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.11.0
 [1.12.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.12.0
+[1.13.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.13.0

@@ -33,8 +33,9 @@ https://proxy.example.com/http://origin.example.com:8096/path
 - 24 小时、7 天、30 天、90 天统计与 CSV 导出。
 - 可关闭的域名黑名单 / 白名单模式，规则只匹配域名及子域名；可设置每日开放时段。
 - Telegram 日报、Cloudflare Turnstile、管理审计与 SQLite 备份恢复。
+- 可上传自定义站点头像，并同步到公共首页、登录页、安装页和管理面板；头像随 SQLite 备份保留。
 - 面板结构化管理常用运行参数，保存前校验并保留上一份可用配置；敏感密钥不向网页返回。
-- 侧栏自动检查 GitHub Release；新版本显示红点，原生 systemd 部署可在面板校验、更新并失败回滚。
+- 侧栏可查看当前与最新版本的 Release 更新日志；新版本显示红点，原生 systemd 部署可在面板校验、更新并失败回滚。
 - Docker Compose + Caddy 自动申请和续期 HTTPS 证书。
 
 ## 一键部署
@@ -117,6 +118,12 @@ curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/insta
 旧版 `/opt/vps-url-gateway` systemd 部署也会被自动识别，脚本将校验最新 Release、备份当前二进制并原地更新；健康检查失败时自动回滚。
 
 原生 systemd 部署升级到支持面板更新的版本后，脚本会安装一个受限的 root 维护 Socket，主服务仍以 `vps-url-gateway` 低权限账号运行。侧栏左下角会自动检查官方 GitHub Release；有新版本时版本号旁显示红点，点击版本区域并确认即可完成 SHA256 校验、原子替换、服务重启和健康检查，失败时自动恢复旧二进制。维护接口不接受任意命令、下载地址或文件路径。Docker Compose 部署不向容器挂载宿主机 Docker 控制权限，因此二进制更新仍使用上面的一键更新命令。
+
+早期 systemd 版本如果只替换过二进制，面板可能提示缺少维护服务。可运行专用修复命令；它只补装受限维护 Socket 并重启 Refract，不修改代理配置、数据库和证书：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/install.sh | sudo sh -s -- --repair-panel-update
+```
 
 ## 手动部署
 

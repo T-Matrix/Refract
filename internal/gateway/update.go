@@ -25,10 +25,30 @@ import (
 	"time"
 )
 
-var Version = "1.12.0"
+var Version = "1.13.0"
+
+const currentReleaseNotes = `## 新增功能
+
+- 系统设置新增品牌外观，可上传 PNG、JPEG 或 WebP 头像，并同步应用到首页、登录页、安装页和管理面板。
+- 侧栏版本区域现在始终可点击，可查看当前版本更新日志；发现新版本时会同时展示新版本功能与发布时间。
+- 旧版 systemd 部署新增面板更新通道专用修复命令，不修改现有代理配置、数据库和证书。
+
+## 修复内容
+
+- 修复早期 systemd 版本只替换程序后缺少维护 Socket，导致面板持续提示当前部署方式不支持更新的问题。
+- 修复旧系统使用 cgroup v1 时无法识别 systemd 服务、从而误判为不支持面板更新的问题。
+- GitHub 暂时不可用时，当前版本更新日志会回退到随程序内置的内容。
+
+## 安全
+
+- 自定义头像存入 SQLite 并随备份保留，上传接口要求登录和同源请求，限制为 512 KiB 并校验真实图片格式。
+- Docker 部署继续禁止容器控制宿主机更新，原生 systemd 更新仍校验官方 Release 与 SHA256。`
+
+const currentReleasePublishedAt = "2026-08-17T00:00:00+08:00"
 
 const (
 	defaultReleaseAPI        = "https://api.github.com/repos/T-Matrix/Refract/releases/latest"
+	defaultReleaseTagAPI     = "https://api.github.com/repos/T-Matrix/Refract/releases/tags"
 	defaultReleaseBase       = "https://github.com/T-Matrix/Refract/releases/download"
 	defaultMaintenanceSocket = "/run/refract-maintenance.sock"
 	maxReleaseMetadata       = 1 << 20
@@ -46,7 +66,11 @@ type updateStatus struct {
 	UpdateAvailable     bool   `json:"update_available"`
 	AutoUpdateSupported bool   `json:"auto_update_supported"`
 	AutoUpdateReason    string `json:"auto_update_reason,omitempty"`
+	RecoveryCommand     string `json:"recovery_command,omitempty"`
 	ReleaseURL          string `json:"release_url,omitempty"`
+	LatestName          string `json:"latest_name,omitempty"`
+	LatestNotes         string `json:"latest_notes,omitempty"`
+	LatestPublishedAt   string `json:"latest_published_at,omitempty"`
 	CheckedAt           int64  `json:"checked_at"`
 	Updating            bool   `json:"updating"`
 }
@@ -57,16 +81,30 @@ type releaseAsset struct {
 }
 
 type latestRelease struct {
-	TagName    string         `json:"tag_name"`
-	Draft      bool           `json:"draft"`
-	Prerelease bool           `json:"prerelease"`
-	Assets     []releaseAsset `json:"assets"`
+	TagName     string         `json:"tag_name"`
+	Name        string         `json:"name"`
+	Body        string         `json:"body"`
+	PublishedAt string         `json:"published_at"`
+	Draft       bool           `json:"draft"`
+	Prerelease  bool           `json:"prerelease"`
+	Assets      []releaseAsset `json:"assets"`
 }
 
 type releaseInfo struct {
-	Version string
-	Tag     string
-	Assets  map[string]releaseAsset
+	Version     string
+	Tag         string
+	Name        string
+	Notes       string
+	PublishedAt string
+	Assets      map[string]releaseAsset
+}
+
+type releaseNotes struct {
+	Version     string `json:"version"`
+	Name        string `json:"name,omitempty"`
+	Notes       string `json:"notes,omitempty"`
+	ReleaseURL  string `json:"release_url,omitempty"`
+	PublishedAt string `json:"published_at,omitempty"`
 }
 
 type maintenanceRequest struct {
@@ -82,6 +120,7 @@ type maintenanceResponse struct {
 type updateManager struct {
 	client            *http.Client
 	apiURL            string
+	tagAPIURL         string
 	releaseBaseURL    string
 	executable        string
 	service           string
@@ -111,6 +150,7 @@ func newUpdateManager(cfg Config) *updateManager {
 			},
 		},
 		apiURL:            defaultReleaseAPI,
+		tagAPIURL:         defaultReleaseTagAPI,
 		releaseBaseURL:    defaultReleaseBase,
 		maintenanceSocket: envString("REFRACT_MAINTENANCE_SOCKET", defaultMaintenanceSocket),
 	}
@@ -159,6 +199,23 @@ func (a *adminServer) handleUpdate(w http.ResponseWriter, r *http.Request, sessi
 	default:
 		a.methodNotAllowed(w, http.MethodGet+", "+http.MethodPost)
 	}
+}
+
+func (a *adminServer) handleUpdateNotes(w http.ResponseWriter, r *http.Request) {
+	if a.gateway.updates == nil {
+		a.writeError(w, http.StatusServiceUnavailable, "update service unavailable")
+		return
+	}
+	if r.Method != http.MethodGet {
+		a.methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	notes, err := a.gateway.updates.ReleaseNotes(r.Context(), normalizedVersion(Version))
+	if err != nil {
+		a.writeError(w, http.StatusBadGateway, "release notes unavailable")
+		return
+	}
+	a.writeJSON(w, http.StatusOK, notes)
 }
 
 func (m *updateManager) autoUpdateUnsupportedReason() string {
@@ -220,7 +277,11 @@ func (m *updateManager) statusForRelease(release releaseInfo, now time.Time) upd
 		UpdateAvailable:     compareVersions(release.Version, Version) > 0,
 		AutoUpdateSupported: autoSupported,
 		AutoUpdateReason:    reason,
+		RecoveryCommand:     updateRecoveryCommand(reason),
 		ReleaseURL:          "https://github.com/T-Matrix/Refract/releases/tag/" + url.PathEscape(release.Tag),
+		LatestName:          release.Name,
+		LatestNotes:         release.Notes,
+		LatestPublishedAt:   release.PublishedAt,
 		CheckedAt:           now.Unix(),
 		Updating:            m.updating.Load(),
 	}
@@ -259,7 +320,77 @@ func (m *updateManager) fetchLatest(ctx context.Context) (releaseInfo, error) {
 			assets[asset.Name] = asset
 		}
 	}
-	return releaseInfo{Version: version.String(), Tag: strings.TrimSpace(payload.TagName), Assets: assets}, nil
+	return releaseInfo{
+		Version: version.String(), Tag: strings.TrimSpace(payload.TagName), Name: strings.TrimSpace(payload.Name),
+		Notes: strings.TrimSpace(payload.Body), PublishedAt: strings.TrimSpace(payload.PublishedAt), Assets: assets,
+	}, nil
+}
+
+func (m *updateManager) ReleaseNotes(ctx context.Context, version string) (releaseNotes, error) {
+	parsed, ok := parseVersion(version)
+	if !ok || parsed.String() != normalizedVersion(Version) {
+		return releaseNotes{}, errors.New("release notes version is invalid")
+	}
+	fallback := currentReleaseNotesFallback(parsed.String())
+	if m.client == nil {
+		return fallback, nil
+	}
+	base := strings.TrimRight(m.tagAPIURL, "/")
+	if base == "" {
+		if strings.HasSuffix(strings.TrimRight(m.apiURL, "/"), "/latest") {
+			base = strings.TrimSuffix(strings.TrimRight(m.apiURL, "/"), "/latest") + "/tags"
+		} else {
+			base = defaultReleaseTagAPI
+		}
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/"+url.PathEscape("v"+parsed.String()), nil)
+	if err != nil {
+		return fallback, nil
+	}
+	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("User-Agent", "Refract/"+normalizedVersion(Version))
+	response, err := m.client.Do(request)
+	if err != nil {
+		return fallback, nil
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fallback, nil
+	}
+	var payload latestRelease
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxReleaseMetadata)).Decode(&payload); err != nil {
+		return fallback, nil
+	}
+	releaseVersion, valid := parseVersion(payload.TagName)
+	if !valid || releaseVersion.String() != parsed.String() || payload.Draft || payload.Prerelease {
+		return fallback, nil
+	}
+	tag := strings.TrimSpace(payload.TagName)
+	return releaseNotes{
+		Version: parsed.String(), Name: strings.TrimSpace(payload.Name), Notes: strings.TrimSpace(payload.Body),
+		ReleaseURL:  "https://github.com/T-Matrix/Refract/releases/tag/" + url.PathEscape(tag),
+		PublishedAt: strings.TrimSpace(payload.PublishedAt),
+	}, nil
+}
+
+func currentReleaseNotesFallback(version string) releaseNotes {
+	tag := "v" + normalizedVersion(version)
+	return releaseNotes{
+		Version: normalizedVersion(version), Name: "Refract " + tag, Notes: currentReleaseNotes,
+		ReleaseURL:  "https://github.com/T-Matrix/Refract/releases/tag/" + url.PathEscape(tag),
+		PublishedAt: currentReleasePublishedAt,
+	}
+}
+
+func updateRecoveryCommand(reason string) string {
+	switch reason {
+	case "maintenance_service_required":
+		return "curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/install.sh | sudo sh -s -- --repair-panel-update"
+	case "native_systemd_required":
+		return "curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/install.sh | sudo sh"
+	default:
+		return ""
+	}
 }
 
 func (m *updateManager) Start(ctx context.Context, requestedVersion string) (updateStatus, error) {
@@ -595,12 +726,16 @@ func detectSystemdService() string {
 	if err != nil {
 		return ""
 	}
+	return detectSystemdServiceFromCgroup(string(data))
+}
+
+func detectSystemdServiceFromCgroup(data string) string {
 	for _, line := range strings.Split(string(data), "\n") {
-		_, path, ok := strings.Cut(line, "::")
-		if !ok {
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 {
 			continue
 		}
-		service := filepath.Base(strings.TrimSpace(path))
+		service := filepath.Base(strings.TrimSpace(parts[2]))
 		if servicePattern.MatchString(service) {
 			return service
 		}

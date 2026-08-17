@@ -65,7 +65,7 @@ func TestUpdateStatusChecksLatestReleaseAndCachesResult(t *testing.T) {
 			return
 		}
 		_ = json.NewEncoder(writer).Encode(latestRelease{
-			TagName: "v1.8.1",
+			TagName: "v1.8.1", Name: "Refract v1.8.1", Body: "## 新增功能\n\n- 面板更新日志", PublishedAt: "2026-08-17T08:00:00Z",
 			Assets: []releaseAsset{
 				{Name: "refract-linux-" + runtime.GOARCH},
 				{Name: "SHA256SUMS.txt"},
@@ -86,11 +86,60 @@ func TestUpdateStatusChecksLatestReleaseAndCachesResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !first.UpdateAvailable || !first.AutoUpdateSupported || first.CurrentVersion != "1.8.0" || first.LatestVersion != "1.8.1" {
+	if !first.UpdateAvailable || !first.AutoUpdateSupported || first.CurrentVersion != "1.8.0" || first.LatestVersion != "1.8.1" ||
+		first.LatestName != "Refract v1.8.1" || !strings.Contains(first.LatestNotes, "面板更新日志") || first.LatestPublishedAt == "" {
 		t.Fatalf("unexpected update status: %#v", first)
 	}
 	if second != first || requests.Load() != 1 {
 		t.Fatalf("release status was not cached: second=%#v requests=%d", second, requests.Load())
+	}
+}
+
+func TestReleaseNotesReadsOnlyRunningVersion(t *testing.T) {
+	oldVersion := Version
+	Version = "1.8.0"
+	t.Cleanup(func() { Version = oldVersion })
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/tags/v1.8.0" {
+			http.NotFound(writer, request)
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(latestRelease{
+			TagName: "v1.8.0", Name: "Refract v1.8.0", Body: "## 修复内容\n\n- 修复旧版更新", PublishedAt: "2026-08-17T09:00:00Z",
+		})
+	}))
+	defer server.Close()
+	manager := &updateManager{client: server.Client(), tagAPIURL: server.URL + "/tags"}
+	notes, err := manager.ReleaseNotes(context.Background(), "1.8.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notes.Version != "1.8.0" || notes.Name != "Refract v1.8.0" || !strings.Contains(notes.Notes, "修复旧版更新") || notes.ReleaseURL == "" {
+		t.Fatalf("release notes=%#v", notes)
+	}
+	if _, err := manager.ReleaseNotes(context.Background(), "1.8.1"); err == nil {
+		t.Fatal("release notes accepted a version other than the running version")
+	}
+}
+
+func TestReleaseNotesFallBackWhenGitHubIsUnavailable(t *testing.T) {
+	manager := &updateManager{}
+	notes, err := manager.ReleaseNotes(context.Background(), normalizedVersion(Version))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notes.Version != normalizedVersion(Version) || !strings.Contains(notes.Notes, "品牌外观") || notes.ReleaseURL == "" {
+		t.Fatalf("fallback release notes=%#v", notes)
+	}
+}
+
+func TestUpdateRecoveryCommandTargetsLegacyRepair(t *testing.T) {
+	command := updateRecoveryCommand("maintenance_service_required")
+	if !strings.Contains(command, "--repair-panel-update") {
+		t.Fatalf("legacy recovery command=%q", command)
+	}
+	if command := updateRecoveryCommand("release_assets_missing"); command != "" {
+		t.Fatalf("unexpected recovery command=%q", command)
 	}
 }
 
@@ -181,6 +230,25 @@ func TestUpdateAPIRequiresAuthenticationAndSameOrigin(t *testing.T) {
 	}
 }
 
+func TestCurrentReleaseNotesAPIRequiresAuthenticationAndUsesFallback(t *testing.T) {
+	gateway := newAdminTestGateway(t)
+	gateway.updates = &updateManager{}
+	unauthenticated := adminRequest(t, gateway, http.MethodGet, "/_admin/api/update/notes", nil, nil, false)
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated release notes status=%d", unauthenticated.Code)
+	}
+	cookie := loginAdmin(t, gateway)
+	response := adminRequest(t, gateway, http.MethodGet, "/_admin/api/update/notes", nil, cookie, false)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"version":"`+normalizedVersion(Version)+`"`) ||
+		!strings.Contains(response.Body.String(), "品牌外观") {
+		t.Fatalf("release notes status=%d body=%s", response.Code, response.Body.String())
+	}
+	write := adminRequest(t, gateway, http.MethodPost, "/_admin/api/update/notes", map[string]string{}, cookie, true)
+	if write.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("release notes write status=%d", write.Code)
+	}
+}
+
 func TestUpdateHelperRejectsUnsafeArguments(t *testing.T) {
 	_, err := parseUpdateHelperArgs([]string{
 		"--service", "../../evil.service",
@@ -234,6 +302,22 @@ func TestLocalUpdateHealthURL(t *testing.T) {
 	}
 }
 
+func TestDetectSystemdServiceSupportsCgroupV1AndV2(t *testing.T) {
+	for name, data := range map[string]string{
+		"v2": "0::/system.slice/vps-url-gateway.service\n",
+		"v1": "1:name=systemd:/system.slice/vps-url-gateway.service\n2:cpu:/user.slice\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := detectSystemdServiceFromCgroup(data); got != "vps-url-gateway.service" {
+				t.Fatalf("service=%q", got)
+			}
+		})
+	}
+	if got := detectSystemdServiceFromCgroup("0::/docker/../../unsafe.service/child\n"); got != "" {
+		t.Fatalf("unsafe cgroup service=%q", got)
+	}
+}
+
 func TestChecksumForAssetRejectsMalformedManifest(t *testing.T) {
 	if _, err := checksumForAsset([]byte("not-a-checksum  refract-linux-amd64\n"), "refract-linux-amd64"); err == nil {
 		t.Fatal("malformed checksum manifest was accepted")
@@ -249,5 +333,8 @@ func TestStatusTimestampUsesCurrentTime(t *testing.T) {
 	status := manager.statusForRelease(releaseInfo{Version: "1.8.1", Tag: "v1.8.1", Assets: map[string]releaseAsset{}}, checked)
 	if status.CheckedAt != checked.Unix() {
 		t.Fatalf("checked_at=%d, want %d", status.CheckedAt, checked.Unix())
+	}
+	if !strings.Contains(status.RecoveryCommand, "scripts/install.sh") {
+		t.Fatalf("recovery command=%q", status.RecoveryCommand)
 	}
 }

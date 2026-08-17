@@ -207,6 +207,9 @@ func (g *Gateway) Close() {
 }
 
 func (g *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	if g.serveBrandAvatar(writer, request) {
+		return
+	}
 	if servePublicFrontend(writer, request) {
 		return
 	}

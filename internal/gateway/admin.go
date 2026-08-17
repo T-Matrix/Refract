@@ -198,6 +198,10 @@ func (a *adminServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusOK, map[string]any{"username": session.Username, "expires": session.Expires, "version": normalizedVersion(Version)})
 	case "/_admin/api/update":
 		a.handleUpdate(w, r, session)
+	case "/_admin/api/update/notes":
+		a.handleUpdateNotes(w, r)
+	case "/_admin/api/branding":
+		a.handleBranding(w, r)
 	case "/_admin/api/runtime-config":
 		a.handleRuntimeConfig(w, r, session)
 	case "/_admin/api/dashboard":
