@@ -30,6 +30,7 @@ type runtimeSettings struct {
 	ResponseHeaderTimeoutSeconds int64  `json:"response_header_timeout_seconds"`
 	MaxConcurrentRequests        int    `json:"max_concurrent_requests"`
 	MaxConcurrentPerIP           int    `json:"max_concurrent_per_ip"`
+	MaxDownloadMbitPerIP         int64  `json:"max_download_mbps_per_ip"`
 }
 
 type runtimeSettingsView struct {
@@ -89,7 +90,7 @@ func (a *adminServer) handleRuntimeConfig(w http.ResponseWriter, r *http.Request
 			a.writeError(w, http.StatusBadRequest, "invalid runtime configuration")
 			return
 		}
-		detail := fmt.Sprintf("requested_by=%s public_proxy=%t concurrency=%d/%d", session.Username, view.AllowUnsigned, view.MaxConcurrentRequests, view.MaxConcurrentPerIP)
+		detail := fmt.Sprintf("requested_by=%s public_proxy=%t concurrency=%d/%d download_mbps_per_ip=%d", session.Username, view.AllowUnsigned, view.MaxConcurrentRequests, view.MaxConcurrentPerIP, view.MaxDownloadMbitPerIP)
 		a.auditRequest(r, "system.configuration", "runtime", detail, true)
 		if view.RestartOnSave && a.gateway.restarting.CompareAndSwap(false, true) {
 			view.RestartPending = true
@@ -174,6 +175,7 @@ func runtimeSettingsFromConfig(cfg Config) runtimeSettings {
 		ResponseHeaderTimeoutSeconds: int64(cfg.ResponseTimeout / time.Second),
 		MaxConcurrentRequests:        cfg.MaxConcurrent,
 		MaxConcurrentPerIP:           cfg.MaxConcurrentPerIP,
+		MaxDownloadMbitPerIP:         bytesToMegabits(cfg.MaxDownloadBPSPerIP),
 	}
 }
 
@@ -218,6 +220,9 @@ func applyRuntimeSettings(base Config, settings runtimeSettings) (Config, runtim
 	if settings.MaxConcurrentPerIP < 1 || settings.MaxConcurrentPerIP > settings.MaxConcurrentRequests {
 		return Config{}, runtimeSettings{}, errors.New("per-IP concurrency must not exceed global concurrency")
 	}
+	if settings.MaxDownloadMbitPerIP < 0 || settings.MaxDownloadMbitPerIP > 100000 {
+		return Config{}, runtimeSettings{}, errors.New("per-IP download limit must be between 0 and 100000 Mbps")
+	}
 	base.DefaultUpstream = defaultUpstream
 	base.AllowedUpstreamsRaw = settings.AllowedUpstreams
 	base.AllowedUpstreams = patterns
@@ -230,6 +235,7 @@ func applyRuntimeSettings(base Config, settings runtimeSettings) (Config, runtim
 	base.ResponseTimeout = time.Duration(settings.ResponseHeaderTimeoutSeconds) * time.Second
 	base.MaxConcurrent = settings.MaxConcurrentRequests
 	base.MaxConcurrentPerIP = settings.MaxConcurrentPerIP
+	base.MaxDownloadBPSPerIP = megabitsToBytes(settings.MaxDownloadMbitPerIP)
 	return base, runtimeSettingsFromConfig(base), nil
 }
 

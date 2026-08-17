@@ -34,6 +34,7 @@ type Gateway struct {
 	updates     *updateManager
 	runtime     *runtimeConfigManager
 	limiter     *requestLimiter
+	bandwidth   *bandwidthLimiter
 	meter       *rateMeter
 	connections *connectionTracker
 	started     time.Time
@@ -66,6 +67,7 @@ func NewChecked(cfg Config) (*Gateway, error) {
 		signer:      NewSigner(cfg.SigningSecret, cfg.SignedURLTTL),
 		resolver:    newSafeResolver(cfg.DNSCacheTTL, cfg.AllowPrivateTargets),
 		limiter:     newRequestLimiter(cfg.MaxConcurrent, cfg.MaxConcurrentPerIP),
+		bandwidth:   newBandwidthLimiter(cfg.MaxDownloadBPSPerIP),
 		meter:       newRateMeter(),
 		connections: newConnectionTracker(),
 		started:     time.Now(),
@@ -237,7 +239,9 @@ func (g *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		writeGatewayError(writer, http.StatusForbidden, "target is not allowed")
 		return
 	}
-	if !g.policy.Load().Allows(target) {
+	policy := g.policy.Load()
+	policyCheckedAt := time.Now()
+	if !policy.AllowsAt(target, policyCheckedAt) {
 		g.blocked.Add(1)
 		if g.telemetry != nil {
 			g.telemetry.Record(telemetryEvent{
@@ -258,7 +262,16 @@ func (g *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	defer g.limiter.Release(client)
 	g.active.Add(1)
 	defer g.active.Add(-1)
-	requestContext, cancelRequest := context.WithCancel(request.Context())
+	var requestContext context.Context
+	var cancelRequest context.CancelFunc
+	if policy.ScheduleEnabled {
+		if open, closesAt := policy.scheduleStatus(policyCheckedAt); open && !closesAt.IsZero() {
+			requestContext, cancelRequest = context.WithDeadline(request.Context(), closesAt)
+		}
+	}
+	if requestContext == nil {
+		requestContext, cancelRequest = context.WithCancel(request.Context())
+	}
 	defer cancelRequest()
 	path := target.EscapedPath()
 	if path == "" {
@@ -293,7 +306,10 @@ func (g *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		uploadCounter = &countingReadCloser{ReadCloser: request.Body, meter: g.meter, flow: flow}
 		request.Body = uploadCounter
 	}
-	loggingWriter := &accessResponseWriter{ResponseWriter: writer, meter: g.meter, flow: flow, clientIP: client}
+	loggingWriter := &accessResponseWriter{
+		ResponseWriter: writer, meter: g.meter, flow: flow, clientIP: client,
+		bandwidth: g.bandwidth, context: request.Context(),
+	}
 	proxiedRequest := request.WithContext(context.WithValue(request.Context(), targetContextKey{}, info))
 	defer g.finalizeProxyRequest(request, target, path, client, started, loggingWriter, flow)
 	g.proxy.ServeHTTP(loggingWriter, proxiedRequest)
@@ -379,7 +395,7 @@ func (g *Gateway) rewriteRequest(proxyRequest *httputil.ProxyRequest) {
 }
 
 func (g *Gateway) handleProxyError(writer http.ResponseWriter, request *http.Request, err error) {
-	if errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, net.ErrClosed) {
 		if loggingWriter, ok := writer.(*accessResponseWriter); ok && loggingWriter.status == 0 {
 			loggingWriter.status = 499
 		}
@@ -475,11 +491,13 @@ func (p *byteBufferPool) Put(buffer []byte) {
 
 type accessResponseWriter struct {
 	http.ResponseWriter
-	status   int
-	bytes    int64
-	meter    *rateMeter
-	flow     *connectionFlow
-	clientIP string
+	status    int
+	bytes     int64
+	meter     *rateMeter
+	flow      *connectionFlow
+	clientIP  string
+	bandwidth *bandwidthLimiter
+	context   context.Context
 }
 
 func (w *accessResponseWriter) Unwrap() http.ResponseWriter {
@@ -498,7 +516,7 @@ func (w *accessResponseWriter) Write(data []byte) (int, error) {
 	if w.status == 0 {
 		w.status = http.StatusOK
 	}
-	written, err := w.ResponseWriter.Write(data)
+	written, err := writeWithBandwidthLimit(w.context, w.bandwidth, w.clientIP, data, w.ResponseWriter.Write)
 	w.bytes += int64(written)
 	w.meter.AddDownload(int64(written))
 	w.meter.AddClientDownload(w.clientIP, int64(written))
@@ -510,20 +528,7 @@ func (w *accessResponseWriter) ReadFrom(reader io.Reader) (int64, error) {
 	if w.status == 0 {
 		w.status = http.StatusOK
 	}
-	if readerFrom, ok := w.ResponseWriter.(io.ReaderFrom); ok {
-		written, err := readerFrom.ReadFrom(reader)
-		w.bytes += written
-		w.meter.AddDownload(written)
-		w.meter.AddClientDownload(w.clientIP, written)
-		w.flow.AddDownload(written)
-		return written, err
-	}
-	written, err := io.Copy(struct{ io.Writer }{w.ResponseWriter}, reader)
-	w.bytes += written
-	w.meter.AddDownload(written)
-	w.meter.AddClientDownload(w.clientIP, written)
-	w.flow.AddDownload(written)
-	return written, err
+	return io.CopyBuffer(struct{ io.Writer }{w}, reader, make([]byte, bandwidthWriteChunk))
 }
 
 func (w *accessResponseWriter) Flush() {
@@ -544,5 +549,9 @@ func (w *accessResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return &meteredConn{Conn: connection, meter: w.meter, flow: w.flow, clientIP: w.clientIP}, buffered, nil
+	metered := &meteredConn{
+		Conn: connection, meter: w.meter, flow: w.flow, clientIP: w.clientIP,
+		bandwidth: w.bandwidth, context: w.context,
+	}
+	return metered, bufio.NewReadWriter(buffered.Reader, bufio.NewWriter(metered)), nil
 }

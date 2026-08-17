@@ -6,11 +6,11 @@
   <meta name="robots" content="noindex,nofollow">
   <title>Refract</title>
   <link rel="icon" href="/_admin/assets/refract-icon.png" type="image/png">
-  <link rel="stylesheet" href="/_admin/assets/app.css?v=1.10.0-20260817">
+  <link rel="stylesheet" href="/_admin/assets/app.css?v=1.11.0-20260817">
   <script defer src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"></script>
   <script defer src="/_admin/assets/lucide.min.js"></script>
   <script defer src="/_admin/assets/echarts.min.js"></script>
-  <script defer src="/_admin/assets/panel.js?v=1.10.0-20260817"></script>
+  <script defer src="/_admin/assets/panel.js?v=1.11.0-20260817"></script>
 </head>
 <body class="panel-page">
   <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -58,7 +58,7 @@
         <button id="update-button" class="sidebar-update" type="button" disabled title="正在检查更新" aria-label="Refract 版本信息">
           <span class="sidebar-update-copy">
             <strong>Refract</strong>
-            <span class="sidebar-version-row"><span id="current-version">Version 1.10.0</span><i id="update-dot" class="update-dot" hidden></i></span>
+            <span class="sidebar-version-row"><span id="current-version">Version 1.11.0</span><i id="update-dot" class="update-dot" hidden></i></span>
           </span>
           <i id="update-icon" class="sidebar-update-icon" data-lucide="circle-arrow-up" aria-hidden="true"></i>
         </button>
@@ -251,6 +251,19 @@
             </form>
             <p id="rule-error" class="form-error inline-error" role="alert" hidden></p>
           </section>
+          <section class="data-section policy-schedule-section">
+            <div class="section-heading">
+              <div><h2>每日开放时段</h2><p id="policy-schedule-summary">未启用 · 全天遵循访问模式</p></div>
+              <label class="toggle-control"><input id="policy-schedule-enabled" type="checkbox"><span aria-hidden="true"></span><b>启用</b></label>
+            </div>
+            <form id="policy-schedule-form" class="policy-schedule-form">
+              <div><label for="policy-schedule-start">开放时间</label><input id="policy-schedule-start" type="time" required></div>
+              <div><label for="policy-schedule-end">关闭时间</label><input id="policy-schedule-end" type="time" required></div>
+              <div class="schedule-state"><span id="policy-schedule-status" class="security-badge muted-badge"><i data-lucide="clock-3"></i>未启用</span><small id="policy-schedule-timezone" class="field-status">北京时间 Asia/Shanghai</small></div>
+              <button class="primary-button compact" type="submit"><i data-lucide="save"></i><span>保存时段</span></button>
+              <p id="policy-schedule-error" class="form-error" role="alert" hidden></p>
+            </form>
+          </section>
           <section class="data-section table-section rules-table-section">
             <div class="section-heading"><div><h2 id="rule-list-title">域名名单</h2><p>匹配域名自身及其子域名</p></div><span id="rule-count" class="quiet-label">0 个域名</span></div>
             <div class="table-scroll">
@@ -276,7 +289,7 @@
             <section class="data-section backup-config-section">
               <div class="section-heading"><div><h2>自动备份</h2><p id="backup-next-run">未安排下次备份</p></div><label class="toggle-control"><input id="backup-enabled" type="checkbox"><span aria-hidden="true"></span><b>启用</b></label></div>
               <form id="backup-config-form" class="backup-config-form">
-                <div><label for="backup-hour">执行时间</label><select id="backup-hour"></select></div>
+                <div><label for="backup-hour">执行时间（北京时间）</label><select id="backup-hour"></select></div>
                 <div><label for="backup-retention">保留数量</label><input id="backup-retention" type="number" min="1" max="30" required></div>
                 <button class="primary-button compact" type="submit"><i data-lucide="save"></i><span>保存策略</span></button>
                 <p id="backup-config-error" class="form-error" role="alert" hidden></p>
@@ -346,6 +359,7 @@
                   <div><label for="runtime-response-timeout">响应头超时</label><div class="unit-input"><input id="runtime-response-timeout" type="number" min="1" max="600" required><span>秒</span></div></div>
                   <div><label for="runtime-global-limit">全局并发</label><input id="runtime-global-limit" type="number" min="1" max="4096" required></div>
                   <div><label for="runtime-ip-limit">单 IP 并发</label><input id="runtime-ip-limit" type="number" min="1" max="4096" required></div>
+                  <div><label for="runtime-ip-speed-limit">单 IP 下行上限</label><div class="unit-input"><input id="runtime-ip-speed-limit" type="number" min="0" max="100000" required><span>Mbps</span></div><small class="field-status">所有并发连接合计，0 表示不限速</small></div>
                 </div>
                 <p id="runtime-config-error" class="form-error runtime-wide-field" role="alert" hidden></p>
                 <div class="form-actions runtime-wide-field">

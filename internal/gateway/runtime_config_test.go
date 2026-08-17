@@ -25,6 +25,7 @@ func validRuntimeSettings() runtimeSettings {
 		ResponseHeaderTimeoutSeconds: 60,
 		MaxConcurrentRequests:        256,
 		MaxConcurrentPerIP:           64,
+		MaxDownloadMbitPerIP:         80,
 	}
 }
 
@@ -56,6 +57,9 @@ func TestRuntimeConfigAPIIsAuthenticatedValidatedAndPrivate(t *testing.T) {
 	saved := adminRequest(t, gateway, http.MethodPut, "/_admin/api/runtime-config", settings, cookie, true)
 	if saved.Code != http.StatusOK || !strings.Contains(saved.Body.String(), `"default_upstream":"https://emby.example.com"`) {
 		t.Fatalf("save status=%d body=%s", saved.Code, saved.Body.String())
+	}
+	if gateway.runtime.current.MaxDownloadMbitPerIP != 80 {
+		t.Fatalf("saved per-IP speed limit = %d Mbps", gateway.runtime.current.MaxDownloadMbitPerIP)
 	}
 	info, err := os.Stat(gateway.cfg.RuntimeConfigPath)
 	if err != nil {

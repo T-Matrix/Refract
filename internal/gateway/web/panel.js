@@ -1,10 +1,11 @@
 (() => {
   'use strict';
 
+  const applicationTimeZone = 'Asia/Shanghai';
   const state = {
     snapshot: null, geography: null, overviewPeriod: '24h', geoChart: null, geoMapPromise: null,
     view: 'overview', dashboardTimer: null, dashboardPromise: null, liveTimer: null, liveRefreshing: false, updateTimer: null,
-    policy: null, telegram: null, turnstile: null, turnstileWidget: null, turnstileToken: '', runtimeConfig: null,
+    policy: null, policyTimer: null, telegram: null, turnstile: null, turnstileWidget: null, turnstileToken: '', runtimeConfig: null,
     report: null, reportPeriod: '24h', reportLiveChart: null, reportTrendChart: null, reportRegionChart: null,
     liveSeries: [], backups: null, update: null, settingsSection: 'settings-security'
   };
@@ -42,7 +43,9 @@
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
     })[character]);
   }
-  function formatTime(seconds) { return new Date(Number(seconds) * 1000).toLocaleString('zh-CN', { hour12: false }); }
+  function formatTime(seconds) {
+    return new Date(Number(seconds) * 1000).toLocaleString('zh-CN', { hour12: false, timeZone: applicationTimeZone });
+  }
   function formatDuration(milliseconds) {
     const seconds = Math.max(0, Math.floor((Number(milliseconds) || 0) / 1000));
     if (seconds < 60) return `${seconds} 秒`;
@@ -405,7 +408,9 @@
     context.textAlign = 'center';
     const labels = [0, Math.floor((points.length - 1) / 2), points.length - 1].filter((value, index, all) => all.indexOf(value) === index);
     labels.forEach((index) => {
-      const time = new Date(points[index].timestamp * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+      const time = new Date(points[index].timestamp * 1000).toLocaleTimeString('zh-CN', {
+        hour: '2-digit', minute: '2-digit', hour12: false, timeZone: applicationTimeZone
+      });
       context.fillText(time, padding.left + step * index, rect.height - 5);
     });
   }
@@ -439,7 +444,9 @@
     if (!state.reportLiveChart) state.reportLiveChart = window.echarts.init(container, null, { renderer: 'canvas' });
     const palette = analyticsPalette();
     const option = reportChartBase(palette);
-    option.xAxis.data = state.liveSeries.map((point) => new Date(point.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }));
+    option.xAxis.data = state.liveSeries.map((point) => new Date(point.timestamp).toLocaleTimeString('zh-CN', {
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: applicationTimeZone
+    }));
     option.yAxis.axisLabel.formatter = (value) => `${formatBytes(value)}/s`;
     if (!state.liveSeries.some((point) => point.upload > 0 || point.download > 0)) {
       option.yAxis.max = 1;
@@ -476,7 +483,9 @@
     const points = report.timeline || [];
     const shortPeriod = Number(report.period_hours) <= 24;
     option.title = points.length ? undefined : { text: '暂无流量数据', left: 'center', top: 'middle', textStyle: { color: palette.muted, fontSize: 12, fontWeight: 400 } };
-    option.xAxis.data = points.map((point) => new Date(point.timestamp * 1000).toLocaleString('zh-CN', shortPeriod ? { hour: '2-digit', minute: '2-digit', hour12: false } : { month: '2-digit', day: '2-digit' }));
+    option.xAxis.data = points.map((point) => new Date(point.timestamp * 1000).toLocaleString('zh-CN', shortPeriod ?
+      { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: applicationTimeZone } :
+      { month: '2-digit', day: '2-digit', timeZone: applicationTimeZone }));
     option.tooltip.valueFormatter = (value) => formatBytes(value);
     option.series = [
       { name: '上传', type: 'line', showSymbol: false, data: points.map((point) => Number(point.bytes_in) || 0), lineStyle: { width: 2, color: palette.green }, itemStyle: { color: palette.green } },
@@ -814,6 +823,28 @@
     const summary = mode === 'blacklist' ? `名单内禁止访问 · ${formatNumber(rules.length)} 个域名` :
       mode === 'whitelist' ? `仅名单内可以访问 · ${formatNumber(rules.length)} 个域名` : '全部域名放行 · 名单不参与匹配';
     document.getElementById('policy-summary').textContent = `${modeLabel} · ${summary}`;
+    const scheduleEnabled = Boolean(policy.schedule_enabled);
+    const scheduleOpen = Boolean(policy.schedule_open);
+    const scheduleStart = policy.schedule_start || '09:00';
+    const scheduleEnd = policy.schedule_end || '23:00';
+    document.getElementById('policy-schedule-enabled').checked = scheduleEnabled;
+    document.getElementById('policy-schedule-start').value = scheduleStart;
+    document.getElementById('policy-schedule-end').value = scheduleEnd;
+    document.getElementById('policy-schedule-summary').textContent = scheduleEnabled ?
+      `${scheduleStart}–${scheduleEnd} 开放 · 时段外拒绝所有代理请求` : '未启用 · 全天遵循访问模式';
+    document.getElementById('policy-schedule-timezone').textContent = `北京时间 ${policy.schedule_timezone || applicationTimeZone}`;
+    const scheduleStatus = document.getElementById('policy-schedule-status');
+    scheduleStatus.className = `security-badge${scheduleEnabled ? (scheduleOpen ? '' : ' closed-badge') : ' muted-badge'}`;
+    scheduleStatus.innerHTML = scheduleEnabled ?
+      (scheduleOpen ? `<i data-lucide="door-open"></i>当前开放 · ${scheduleEnd} 关闭` : `<i data-lucide="door-closed"></i>当前关闭 · ${scheduleStart} 开放`) :
+      '<i data-lucide="clock-3"></i>未启用';
+    clearTimeout(state.policyTimer);
+    const nextTransition = Number(policy.schedule_next_transition) * 1000;
+    if (scheduleEnabled && nextTransition > Date.now()) {
+      state.policyTimer = window.setTimeout(() => {
+        api('/_admin/api/policy').then(renderPolicy).catch(() => {});
+      }, Math.min(nextTransition - Date.now() + 1000, 2147483647));
+    }
     document.getElementById('rule-list-title').textContent = mode === 'off' ? '域名名单' : modeLabel;
     document.getElementById('rule-count').textContent = `${formatNumber(rules.length)} 个域名`;
     const domainInput = document.getElementById('rule-domain');
@@ -881,7 +912,7 @@
   const auditActionLabels = {
     'session.login': '管理员登录', 'session.logout': '退出登录', 'account.password': '修改密码',
     'policy.mode': '切换访问模式', 'policy.rule.create': '添加域名规则', 'policy.rule.delete': '删除域名规则',
-    'policy.domain.quick': '快捷域名规则', 'connection.terminate': '断开实时连接',
+    'policy.domain.quick': '快捷域名规则', 'policy.schedule': '修改开放时段', 'connection.terminate': '断开实时连接',
     'telegram.settings': '修改 Telegram', 'telegram.test': '测试 Telegram',
     'backup.auto': '自动备份', 'backup.create': '创建备份', 'backup.import': '导入备份',
     'backup.restore': '恢复备份', 'backup.delete': '删除备份', 'backup.settings': '修改备份策略',
@@ -1026,6 +1057,7 @@
     document.getElementById('runtime-response-timeout').value = String(config.response_header_timeout_seconds ?? 60);
     document.getElementById('runtime-global-limit').value = String(config.max_concurrent_requests ?? 256);
     document.getElementById('runtime-ip-limit').value = String(config.max_concurrent_per_ip ?? 64);
+    document.getElementById('runtime-ip-speed-limit').value = String(config.max_download_mbps_per_ip ?? 0);
     const status = document.getElementById('runtime-config-status');
     const pending = Boolean(config.restart_pending);
     status.classList.toggle('muted-badge', pending || !config.restart_on_save);
@@ -1051,7 +1083,8 @@
       dial_timeout_seconds: Number(document.getElementById('runtime-dial-timeout').value),
       response_header_timeout_seconds: Number(document.getElementById('runtime-response-timeout').value),
       max_concurrent_requests: Number(document.getElementById('runtime-global-limit').value),
-      max_concurrent_per_ip: Number(document.getElementById('runtime-ip-limit').value)
+      max_concurrent_per_ip: Number(document.getElementById('runtime-ip-limit').value),
+      max_download_mbps_per_ip: Number(document.getElementById('runtime-ip-speed-limit').value)
     };
   }
 
@@ -1511,6 +1544,41 @@
         error.hidden = false;
       }
     });
+    document.getElementById('policy-schedule-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const error = document.getElementById('policy-schedule-error');
+      error.hidden = true;
+      if (!form.reportValidity()) return;
+      const start = document.getElementById('policy-schedule-start').value;
+      const end = document.getElementById('policy-schedule-end').value;
+      if (start === end) {
+        error.textContent = '开放时间和关闭时间不能相同';
+        error.hidden = false;
+        return;
+      }
+      const enabled = document.getElementById('policy-schedule-enabled').checked;
+      const confirmed = await confirmAction({
+        title: '保存每日开放时段',
+        message: enabled ? `代理将在每天 ${start}–${end} 开放，时段外拒绝请求。保存时会断开当前代理连接，让新时段立即生效。` : '关闭定时开放后，代理将全天按照当前访问模式处理请求。',
+        confirmLabel: enabled ? '保存并立即应用' : '关闭定时开放',
+        icon: enabled ? 'calendar-clock' : 'clock-3',
+        danger: enabled
+      });
+      if (!confirmed) return;
+      const submit = form.querySelector('button[type="submit"]');
+      submit.disabled = true;
+      try {
+        const policy = await api('/_admin/api/policy/schedule', jsonOptions('PUT', {
+          enabled, start, end
+        }));
+        renderPolicy(policy);
+        toast(policy.schedule_enabled ? '每日开放时段已启用' : '每日开放时段已关闭');
+      } catch (failure) {
+        error.textContent = '时段保存失败，请检查开始和结束时间';
+        error.hidden = false;
+      } finally { submit.disabled = false; }
+    });
     document.getElementById('telegram-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       try { await saveTelegram(true); }
@@ -1548,7 +1616,7 @@
           toast('配置已保存，重启服务后生效');
         }
       } catch (failure) {
-        error.textContent = '配置保存失败，请检查上游格式、超时和并发数值';
+        error.textContent = '配置保存失败，请检查上游格式、超时、并发和限速数值';
         error.hidden = false;
       } finally { submit.disabled = false; }
     });

@@ -154,6 +154,22 @@ func (t *connectionTracker) Cancel(id string) bool {
 	return true
 }
 
+func (t *connectionTracker) CancelAll() int {
+	if t == nil {
+		return 0
+	}
+	t.mu.RLock()
+	cancels := make([]context.CancelFunc, 0, len(t.items))
+	for _, flow := range t.items {
+		cancels = append(cancels, flow.cancel)
+	}
+	t.mu.RUnlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+	return len(cancels)
+}
+
 func (t *connectionTracker) Snapshot() []connectionSnapshot {
 	if t == nil {
 		return []connectionSnapshot{}

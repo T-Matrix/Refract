@@ -107,6 +107,7 @@ func (m *backupManager) run() {
 }
 
 func (m *backupManager) maybeCreate(now time.Time) {
+	now = inApplicationTimezone(now)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	config, err := m.store.LoadBackupConfig(ctx)
@@ -312,7 +313,7 @@ func (m *backupManager) prune(retention int, protected map[string]bool) error {
 func backupFilename(kind string) string {
 	random := make([]byte, 3)
 	_, _ = rand.Read(random)
-	return "refract-" + kind + "-" + time.Now().Format("20060102-150405") + "-" + hex.EncodeToString(random) + ".sqlite"
+	return "refract-" + kind + "-" + inApplicationTimezone(time.Now()).Format("20060102-150405") + "-" + hex.EncodeToString(random) + ".sqlite"
 }
 
 func backupInfo(path string) (backupFile, error) {
@@ -478,9 +479,10 @@ func nextBackupRun(now time.Time, config backupConfig) int64 {
 	if !config.Enabled {
 		return 0
 	}
-	next := time.Date(now.Year(), now.Month(), now.Day(), config.Hour, 0, 0, 0, now.Location())
+	now = inApplicationTimezone(now)
+	next := time.Date(now.Year(), now.Month(), now.Day(), config.Hour, 0, 0, 0, applicationLocation)
 	if !next.After(now) {
-		next = next.Add(24 * time.Hour)
+		next = time.Date(now.Year(), now.Month(), now.Day()+1, config.Hour, 0, 0, 0, applicationLocation)
 	}
 	return next.Unix()
 }

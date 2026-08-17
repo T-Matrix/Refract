@@ -491,6 +491,14 @@ tbody tr:hover { background: color-mix(in srgb, var(--panel-alt) 56%, transparen
 .toggle-control input:focus-visible + span { outline: 2px solid color-mix(in srgb, var(--accent) 48%, transparent); outline-offset: 2px; }
 .toggle-control b { font-weight: 600; }
 .policy-control { margin-bottom: 20px; }
+.policy-schedule-section { margin-bottom: 20px; }
+.policy-schedule-form { padding: 3px 16px 18px; display: grid; grid-template-columns: minmax(150px, 1fr) minmax(150px, 1fr) minmax(180px, auto) auto; align-items: end; gap: 12px; }
+.policy-schedule-form label { margin-top: 12px; }
+.policy-schedule-form .primary-button { margin: 0; }
+.policy-schedule-form .form-error { grid-column: 1 / -1; margin: 0; }
+.schedule-state { min-height: 36px; display: flex; align-items: center; gap: 8px; }
+.schedule-state .field-status { margin: 0; white-space: nowrap; }
+.closed-badge { border-color: color-mix(in srgb, var(--red) 24%, var(--border)); background: var(--red-soft); color: var(--red); }
 .policy-mode { min-width: 0; margin: 0; padding: 3px; display: inline-grid; grid-template-columns: repeat(3, minmax(72px, 1fr)); border: 1px solid var(--border-strong); border-radius: 6px; background: var(--panel-alt); }
 .policy-mode label { position: relative; margin: 0; cursor: pointer; }
 .policy-mode input { position: absolute; width: 1px; min-height: 1px; opacity: 0; }
@@ -639,6 +647,8 @@ tbody tr:hover { background: color-mix(in srgb, var(--panel-alt) 56%, transparen
   .turnstile-section { grid-column: auto; }
   .turnstile-section form { display: block; }
   .policy-control .section-heading { align-items: flex-start; flex-direction: column; }
+  .policy-schedule-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .policy-schedule-form .schedule-state { align-self: center; }
   .policy-mode { width: 100%; }
   .geography-heading { align-items: flex-start; flex-direction: column; }
   .geo-heading-actions { width: 100%; justify-content: space-between; }
@@ -683,6 +693,7 @@ tbody tr:hover { background: color-mix(in srgb, var(--panel-alt) 56%, transparen
   .overview-columns, .chart-section, .policy-control { margin-top: 14px; }
   .overview-columns { gap: 14px; }
   .rule-form { grid-template-columns: 1fr; }
+  .policy-schedule-form { grid-template-columns: 1fr; }
   .rule-add { width: 100%; }
   .policy-mode span { min-height: 44px; padding-inline: 8px; }
   .target-traffic { display: none; }

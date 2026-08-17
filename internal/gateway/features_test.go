@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestProxyPolicyMatchingAndPrecedence(t *testing.T) {
@@ -44,6 +45,71 @@ func TestProxyPolicyMatchingAndPrecedence(t *testing.T) {
 	}
 	if policy.Allows(mustURL(t, "https://unmatched.test/Items/1")) {
 		t.Fatal("whitelist mode allowed an unlisted domain")
+	}
+}
+
+func TestProxyPolicyScheduleSupportsDailyAndOvernightWindows(t *testing.T) {
+	target := mustURL(t, "https://media.example.com/video.mkv")
+	location := time.FixedZone("CST", 8*60*60)
+	policy := &proxyPolicy{
+		Mode: proxyModeOff, ScheduleEnabled: true, ScheduleStart: "09:00", ScheduleEnd: "18:00",
+	}
+	if !policy.AllowsAt(target, time.Date(2026, 8, 17, 12, 0, 0, 0, location)) {
+		t.Fatal("daily schedule rejected a request inside the open window")
+	}
+	if policy.AllowsAt(target, time.Date(2026, 8, 17, 18, 0, 0, 0, location)) {
+		t.Fatal("daily schedule allowed a request at the closing boundary")
+	}
+
+	policy.ScheduleStart, policy.ScheduleEnd = "20:00", "02:00"
+	if !policy.AllowsAt(target, time.Date(2026, 8, 17, 23, 30, 0, 0, location)) ||
+		!policy.AllowsAt(target, time.Date(2026, 8, 18, 1, 30, 0, 0, location)) {
+		t.Fatal("overnight schedule rejected a request inside the open window")
+	}
+	if policy.AllowsAt(target, time.Date(2026, 8, 18, 12, 0, 0, 0, location)) {
+		t.Fatal("overnight schedule allowed a daytime request")
+	}
+}
+
+func TestProxyPolicyScheduleAlwaysUsesShanghaiTime(t *testing.T) {
+	target := mustURL(t, "https://media.example.com/video.mkv")
+	policy := &proxyPolicy{
+		Mode: proxyModeOff, ScheduleEnabled: true, ScheduleStart: "09:00", ScheduleEnd: "18:00",
+	}
+	utc := time.Date(2026, 8, 17, 4, 0, 0, 0, time.UTC)
+	if !policy.AllowsAt(target, utc) {
+		t.Fatal("schedule did not interpret 04:00 UTC as 12:00 Asia/Shanghai")
+	}
+	open, closesAt := policy.scheduleStatus(utc)
+	if !open || closesAt.Location().String() != applicationTimezone || closesAt.Hour() != 18 {
+		t.Fatalf("Shanghai schedule status = open %t, closes %s", open, closesAt)
+	}
+}
+
+func TestProxyPolicyScheduleAPIValidatesAndPersists(t *testing.T) {
+	gateway := newAdminTestGateway(t)
+	cookie := loginAdmin(t, gateway)
+
+	invalid := adminRequest(t, gateway, http.MethodPut, "/_admin/api/policy/schedule", map[string]any{
+		"enabled": true, "start": "09:00", "end": "09:00",
+	}, cookie, true)
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid schedule status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+
+	saved := adminRequest(t, gateway, http.MethodPut, "/_admin/api/policy/schedule", map[string]any{
+		"enabled": true, "start": "20:00", "end": "02:00",
+	}, cookie, true)
+	if saved.Code != http.StatusOK || !strings.Contains(saved.Body.String(), `"schedule_enabled":true`) ||
+		!strings.Contains(saved.Body.String(), `"schedule_timezone"`) {
+		t.Fatalf("save schedule status=%d body=%s", saved.Code, saved.Body.String())
+	}
+	policy, err := gateway.telemetry.LoadProxyPolicy(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !policy.ScheduleEnabled || policy.ScheduleStart != "20:00" || policy.ScheduleEnd != "02:00" {
+		t.Fatalf("stored schedule = %#v", policy)
 	}
 }
 

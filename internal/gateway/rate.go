@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"io"
 	"net"
 	"sync"
@@ -148,9 +149,11 @@ func (r *countingReadCloser) Count() int64 { return r.count.Load() }
 
 type meteredConn struct {
 	net.Conn
-	meter    *rateMeter
-	flow     *connectionFlow
-	clientIP string
+	meter     *rateMeter
+	flow      *connectionFlow
+	clientIP  string
+	bandwidth *bandwidthLimiter
+	context   context.Context
 }
 
 func (c *meteredConn) Read(buffer []byte) (int, error) {
@@ -161,7 +164,7 @@ func (c *meteredConn) Read(buffer []byte) (int, error) {
 }
 
 func (c *meteredConn) Write(buffer []byte) (int, error) {
-	written, err := c.Conn.Write(buffer)
+	written, err := writeWithBandwidthLimit(c.context, c.bandwidth, c.clientIP, buffer, c.Conn.Write)
 	c.meter.AddDownload(int64(written))
 	c.meter.AddClientDownload(c.clientIP, int64(written))
 	c.flow.AddDownload(int64(written))

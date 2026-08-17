@@ -2,6 +2,19 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的结构，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.11.0] - 2026-08-17
+
+### 新增
+
+- 运行配置新增单客户端 IP 聚合下行限速，可在面板以 Mbps 设置，`0` 表示不限速。
+- 访问规则新增可选的每日开放时段，支持跨午夜时间范围，并显示当前开放状态与北京时间。
+- 开放时段、Telegram 日报、自动备份和面板时间统一固定为 `Asia/Shanghai`。
+
+### 安全
+
+- 同一客户端 IP 的普通流式响应、并发请求和 WebSocket 共用一个下行额度，无法通过多开连接绕过限速。
+- 开放时段外统一拒绝代理请求；启用或修改时段时断开现有连接，时段内建立的流式连接会在关闭时间自动终止。
+
 ## [1.10.0] - 2026-08-17
 
 ### 新增
@@ -59,3 +72,4 @@
 [1.7.1]: https://github.com/T-Matrix/Refract/releases/tag/v1.7.1
 [1.9.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.9.0
 [1.10.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.10.0
+[1.11.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.11.0

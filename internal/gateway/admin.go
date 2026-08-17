@@ -284,6 +284,8 @@ func (a *adminServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusOK, map[string]any{"logs": logs, "dropped": a.store.dropped.Load()})
 	case "/_admin/api/policy":
 		a.handlePolicy(w, r)
+	case "/_admin/api/policy/schedule":
+		a.handlePolicySchedule(w, r)
 	case "/_admin/api/rules":
 		a.handleRules(w, r)
 	case "/_admin/api/telegram":
@@ -368,6 +370,41 @@ func (a *adminServer) handlePolicy(w http.ResponseWriter, r *http.Request) {
 	default:
 		a.methodNotAllowed(w, http.MethodGet+", "+http.MethodPut)
 	}
+}
+
+func (a *adminServer) handlePolicySchedule(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		a.methodNotAllowed(w, http.MethodPut)
+		return
+	}
+	if !sameOriginRequest(r) {
+		a.writeError(w, http.StatusForbidden, "same-origin request required")
+		return
+	}
+	var payload struct {
+		Enabled bool   `json:"enabled"`
+		Start   string `json:"start"`
+		End     string `json:"end"`
+	}
+	if err := decodeAdminJSON(w, r, &payload); err != nil {
+		a.writeError(w, http.StatusBadRequest, "invalid schedule request")
+		return
+	}
+	if err := a.store.SetProxyPolicySchedule(r.Context(), payload.Enabled, payload.Start, payload.End); err != nil {
+		a.writeError(w, http.StatusBadRequest, "invalid proxy schedule")
+		return
+	}
+	if err := a.gateway.reloadProxyPolicy(r.Context()); err != nil {
+		a.writeError(w, http.StatusInternalServerError, "proxy schedule update failed")
+		return
+	}
+	disconnected := 0
+	if payload.Enabled {
+		disconnected = a.gateway.connections.CancelAll()
+	}
+	detail := fmt.Sprintf("enabled=%t start=%s end=%s disconnected=%d", payload.Enabled, payload.Start, payload.End, disconnected)
+	a.auditRequest(r, "policy.schedule", "daily", detail, true)
+	a.writeJSON(w, http.StatusOK, a.gateway.policy.Load())
 }
 
 func (a *adminServer) handleRules(w http.ResponseWriter, r *http.Request) {

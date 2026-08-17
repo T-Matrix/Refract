@@ -3,7 +3,7 @@ services:
     build:
       context: .
       args:
-        REFRACT_VERSION: "${REFRACT_VERSION:-1.10.0}"
+        REFRACT_VERSION: "${REFRACT_VERSION:-1.11.0}"
     image: refract:local
     restart: unless-stopped
     environment:
@@ -22,7 +22,7 @@ services:
       DNS_CACHE_TTL: "${DNS_CACHE_TTL:-1m}"
       DIAL_TIMEOUT: "${DIAL_TIMEOUT:-15s}"
       RESPONSE_HEADER_TIMEOUT: "${RESPONSE_HEADER_TIMEOUT:-60s}"
-      TZ: "${TZ:-Asia/Shanghai}"
+      TZ: "Asia/Shanghai"
       ADMIN_ENABLED: "${ADMIN_ENABLED:-false}"
       ADMIN_USERNAME: "${ADMIN_USERNAME:-admin}"
       ADMIN_PASSWORD_HASH: "${ADMIN_PASSWORD_HASH:-}"
@@ -35,6 +35,7 @@ services:
       GEOIP_LOOKUP_INTERVAL: "${GEOIP_LOOKUP_INTERVAL:-1100ms}"
       MAX_CONCURRENT_REQUESTS: "${MAX_CONCURRENT_REQUESTS:-256}"
       MAX_CONCURRENT_PER_IP: "${MAX_CONCURRENT_PER_IP:-64}"
+      MAX_DOWNLOAD_MBIT_PER_IP: "${MAX_DOWNLOAD_MBIT_PER_IP:-0}"
       RESTART_ON_CONFIG_SAVE: "true"
     volumes:
       - gateway_data:/data

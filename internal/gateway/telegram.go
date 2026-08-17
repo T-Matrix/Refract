@@ -114,16 +114,12 @@ func newTelegramReporter(store *telemetryStore, gateway *Gateway, secret []byte)
 	if err != nil {
 		return nil, err
 	}
-	zone, err := time.LoadLocation("Asia/Shanghai")
-	if err != nil {
-		zone = time.FixedZone("Asia/Shanghai", 8*60*60)
-	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	reporter := &telegramReporter{
 		store: store, gateway: gateway, cipher: cipher,
 		client:  &http.Client{Transport: transport, Timeout: 15 * time.Second},
-		apiBase: telegramAPIBase, zone: zone,
+		apiBase: telegramAPIBase, zone: applicationLocation,
 		stop: make(chan struct{}), done: make(chan struct{}), wake: make(chan struct{}, 1),
 	}
 	go reporter.run()

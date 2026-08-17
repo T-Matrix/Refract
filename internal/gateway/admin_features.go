@@ -91,17 +91,17 @@ func (a *adminServer) handleReportExport(w http.ResponseWriter, r *http.Request)
 	case "traffic":
 		_ = output.Write([]string{"时间", "请求", "上传字节", "下载字节", "错误"})
 		for _, point := range report.Timeline {
-			_ = output.Write([]string{time.Unix(point.Timestamp, 0).Format(time.RFC3339), integerCell(point.Requests), integerCell(point.BytesIn), integerCell(point.BytesOut), integerCell(point.Errors)})
+			_ = output.Write([]string{inApplicationTimezone(time.Unix(point.Timestamp, 0)).Format(time.RFC3339), integerCell(point.Requests), integerCell(point.BytesIn), integerCell(point.BytesOut), integerCell(point.Errors)})
 		}
 	case "targets":
 		_ = output.Write([]string{"后端", "请求", "下载字节", "错误", "平均耗时毫秒", "最近活动"})
 		for _, target := range report.TopTargets {
-			_ = output.Write([]string{safeCSVCell(target.Host), integerCell(target.Requests), integerCell(target.BytesOut), integerCell(target.Errors), integerCell(target.AvgLatency), time.Unix(target.LastSeen, 0).Format(time.RFC3339)})
+			_ = output.Write([]string{safeCSVCell(target.Host), integerCell(target.Requests), integerCell(target.BytesOut), integerCell(target.Errors), integerCell(target.AvgLatency), inApplicationTimezone(time.Unix(target.LastSeen, 0)).Format(time.RFC3339)})
 		}
 	case "clients":
 		_ = output.Write([]string{"IP", "位置", "请求", "下载字节", "最大下行Bps", "最近活动"})
 		for _, client := range report.TopClients {
-			_ = output.Write([]string{safeCSVCell(client.IP), safeCSVCell(client.Label), integerCell(client.Requests), integerCell(client.BytesOut), integerCell(client.PeakBPS), time.Unix(client.LastSeen, 0).Format(time.RFC3339)})
+			_ = output.Write([]string{safeCSVCell(client.IP), safeCSVCell(client.Label), integerCell(client.Requests), integerCell(client.BytesOut), integerCell(client.PeakBPS), inApplicationTimezone(time.Unix(client.LastSeen, 0)).Format(time.RFC3339)})
 		}
 	case "regions":
 		_ = output.Write([]string{"地域", "IP数", "请求", "下载字节", "最大下行Bps"})

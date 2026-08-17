@@ -39,6 +39,7 @@ type Config struct {
 	GeoIPLookupInterval time.Duration
 	MaxConcurrent       int
 	MaxConcurrentPerIP  int
+	MaxDownloadBPSPerIP int64
 	RuntimeConfigPath   string
 	RestartOnConfigSave bool
 }
@@ -74,6 +75,7 @@ func LoadConfig() (Config, error) {
 		GeoIPLookupInterval: envDuration("GEOIP_LOOKUP_INTERVAL", 1100*time.Millisecond),
 		MaxConcurrent:       envInt("MAX_CONCURRENT_REQUESTS", 256),
 		MaxConcurrentPerIP:  envInt("MAX_CONCURRENT_PER_IP", 64),
+		MaxDownloadBPSPerIP: megabitsToBytes(envInt64("MAX_DOWNLOAD_MBIT_PER_IP", 0)),
 		RuntimeConfigPath:   strings.TrimSpace(os.Getenv("RUNTIME_CONFIG_PATH")),
 		RestartOnConfigSave: envBool("RESTART_ON_CONFIG_SAVE", false),
 	}
@@ -136,6 +138,9 @@ func LoadConfig() (Config, error) {
 	}
 	if cfg.MaxConcurrentPerIP < 1 || cfg.MaxConcurrentPerIP > cfg.MaxConcurrent {
 		return Config{}, fmt.Errorf("MAX_CONCURRENT_PER_IP must be positive and no greater than MAX_CONCURRENT_REQUESTS")
+	}
+	if cfg.MaxDownloadBPSPerIP < 0 || cfg.MaxDownloadBPSPerIP > megabitsToBytes(100000) {
+		return Config{}, fmt.Errorf("MAX_DOWNLOAD_MBIT_PER_IP must be between 0 and 100000")
 	}
 	if cfg.GeoIPLookupURL != "" {
 		lookupURL, parseErr := url.Parse(cfg.GeoIPLookupURL)
@@ -261,6 +266,17 @@ func effectivePort(u *url.URL) string {
 
 func targetHostPort(u *url.URL) string {
 	return net.JoinHostPort(u.Hostname(), effectivePort(u))
+}
+
+func megabitsToBytes(megabits int64) int64 {
+	if megabits > 100000 {
+		return 100000*125000 + 1
+	}
+	return megabits * 125000
+}
+
+func bytesToMegabits(bytes int64) int64 {
+	return bytes * 8 / (1000 * 1000)
 }
 
 func envString(key, fallback string) string {

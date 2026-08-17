@@ -3,10 +3,12 @@ package gateway
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -26,8 +28,35 @@ type proxyRule struct {
 }
 
 type proxyPolicy struct {
-	Mode  string      `json:"mode"`
-	Rules []proxyRule `json:"rules"`
+	Mode            string      `json:"mode"`
+	Rules           []proxyRule `json:"rules"`
+	ScheduleEnabled bool        `json:"schedule_enabled"`
+	ScheduleStart   string      `json:"schedule_start"`
+	ScheduleEnd     string      `json:"schedule_end"`
+}
+
+type proxyPolicyJSON struct {
+	Mode                   string      `json:"mode"`
+	Rules                  []proxyRule `json:"rules"`
+	ScheduleEnabled        bool        `json:"schedule_enabled"`
+	ScheduleStart          string      `json:"schedule_start"`
+	ScheduleEnd            string      `json:"schedule_end"`
+	ScheduleOpen           bool        `json:"schedule_open"`
+	ScheduleTimezone       string      `json:"schedule_timezone"`
+	ScheduleNextTransition int64       `json:"schedule_next_transition"`
+}
+
+func (p *proxyPolicy) MarshalJSON() ([]byte, error) {
+	open, next := p.scheduleStatus(time.Now())
+	nextUnix := int64(0)
+	if !next.IsZero() {
+		nextUnix = next.Unix()
+	}
+	return json.Marshal(proxyPolicyJSON{
+		Mode: p.Mode, Rules: p.Rules,
+		ScheduleEnabled: p.ScheduleEnabled, ScheduleStart: p.ScheduleStart, ScheduleEnd: p.ScheduleEnd,
+		ScheduleOpen: open, ScheduleTimezone: applicationTimezone, ScheduleNextTransition: nextUnix,
+	})
 }
 
 func (g *Gateway) reloadProxyPolicy(ctx context.Context) error {
@@ -40,8 +69,15 @@ func (g *Gateway) reloadProxyPolicy(ctx context.Context) error {
 }
 
 func (p *proxyPolicy) Allows(target *url.URL) bool {
+	return p.AllowsAt(target, time.Now())
+}
+
+func (p *proxyPolicy) AllowsAt(target *url.URL, now time.Time) bool {
 	if p == nil || p.Mode == proxyModeOff {
-		return true
+		return p == nil || p.scheduleAllows(now)
+	}
+	if !p.scheduleAllows(now) {
+		return false
 	}
 	host := normalizeHost(target.Hostname())
 	switch p.Mode {
@@ -52,6 +88,81 @@ func (p *proxyPolicy) Allows(target *url.URL) bool {
 	default:
 		return true
 	}
+}
+
+func (p *proxyPolicy) scheduleAllows(now time.Time) bool {
+	if p == nil || !p.ScheduleEnabled {
+		return true
+	}
+	open, _ := p.scheduleStatus(now)
+	return open
+}
+
+func (p *proxyPolicy) scheduleStatus(now time.Time) (bool, time.Time) {
+	if p == nil || !p.ScheduleEnabled {
+		return true, time.Time{}
+	}
+	now = inApplicationTimezone(now)
+	start, startOK := parseScheduleMinute(p.ScheduleStart)
+	end, endOK := parseScheduleMinute(p.ScheduleEnd)
+	if !startOK || !endOK || start == end {
+		return false, time.Time{}
+	}
+	atMinute := func(dayOffset, value int) time.Time {
+		return time.Date(now.Year(), now.Month(), now.Day()+dayOffset, value/60, value%60, 0, 0, applicationLocation)
+	}
+	minute := now.Hour()*60 + now.Minute()
+	if start < end {
+		switch {
+		case minute < start:
+			return false, atMinute(0, start)
+		case minute < end:
+			return true, atMinute(0, end)
+		default:
+			return false, atMinute(1, start)
+		}
+	}
+	if minute >= start {
+		return true, atMinute(1, end)
+	}
+	if minute < end {
+		return true, atMinute(0, end)
+	}
+	return false, atMinute(0, start)
+}
+
+func normalizeProxySchedule(enabled bool, start, end string) (bool, string, string, error) {
+	start = strings.TrimSpace(start)
+	end = strings.TrimSpace(end)
+	if start == "" {
+		start = "09:00"
+	}
+	if end == "" {
+		end = "23:00"
+	}
+	startMinute, startOK := parseScheduleMinute(start)
+	endMinute, endOK := parseScheduleMinute(end)
+	if !startOK || !endOK || startMinute == endMinute {
+		return false, "", "", errors.New("schedule must use two different HH:MM times")
+	}
+	return enabled, formatScheduleMinute(startMinute), formatScheduleMinute(endMinute), nil
+}
+
+func parseScheduleMinute(value string) (int, bool) {
+	parts := strings.Split(value, ":")
+	if len(parts) != 2 || len(parts[0]) != 2 || len(parts[1]) != 2 {
+		return 0, false
+	}
+	hour, hourErr := strconv.Atoi(parts[0])
+	minute, minuteErr := strconv.Atoi(parts[1])
+	if hourErr != nil || minuteErr != nil || hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+		return 0, false
+	}
+	return hour*60 + minute, true
+}
+
+func formatScheduleMinute(value int) string {
+	return fmt.Sprintf("%02d:%02d", value/60, value%60)
 }
 
 func (p *proxyPolicy) matchingRule(host, action string) *proxyRule {
@@ -121,7 +232,7 @@ func validRuleDomain(value string) bool {
 }
 
 func (s *telemetryStore) LoadProxyPolicy(ctx context.Context) (*proxyPolicy, error) {
-	policy := &proxyPolicy{Mode: proxyModeOff, Rules: []proxyRule{}}
+	policy := &proxyPolicy{Mode: proxyModeOff, Rules: []proxyRule{}, ScheduleStart: "09:00", ScheduleEnd: "23:00"}
 	var storedMode string
 	modeErr := s.db.QueryRowContext(ctx, `SELECT value FROM gateway_settings WHERE key='proxy_policy_mode'`).Scan(&storedMode)
 	if modeErr != nil && !errors.Is(modeErr, sql.ErrNoRows) {
@@ -170,6 +281,23 @@ func (s *telemetryStore) LoadProxyPolicy(ctx context.Context) (*proxyPolicy, err
 			policy.Mode = proxyModeBlacklist
 		}
 	}
+	var scheduleEnabled, scheduleStart, scheduleEnd string
+	for key, destination := range map[string]*string{
+		"proxy_schedule_enabled": &scheduleEnabled,
+		"proxy_schedule_start":   &scheduleStart,
+		"proxy_schedule_end":     &scheduleEnd,
+	} {
+		err := s.db.QueryRowContext(ctx, `SELECT value FROM gateway_settings WHERE key=?`, key).Scan(destination)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+	}
+	enabled, start, end, scheduleErr := normalizeProxySchedule(scheduleEnabled == "1", scheduleStart, scheduleEnd)
+	if scheduleErr == nil {
+		policy.ScheduleEnabled = enabled
+		policy.ScheduleStart = start
+		policy.ScheduleEnd = end
+	}
 	return policy, nil
 }
 
@@ -187,6 +315,34 @@ func (s *telemetryStore) SetProxyPolicyMode(ctx context.Context, mode string) er
 	}
 	defer tx.Rollback()
 	for key, value := range map[string]string{"proxy_policy_mode": mode, "proxy_policy_enabled": legacyEnabled} {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO gateway_settings(key,value,updated_at) VALUES(?,?,?)
+			 ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, key, value, time.Now().Unix()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *telemetryStore) SetProxyPolicySchedule(ctx context.Context, enabled bool, start, end string) error {
+	enabled, start, end, err := normalizeProxySchedule(enabled, start, end)
+	if err != nil {
+		return err
+	}
+	enabledValue := "0"
+	if enabled {
+		enabledValue = "1"
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for key, value := range map[string]string{
+		"proxy_schedule_enabled": enabledValue,
+		"proxy_schedule_start":   start,
+		"proxy_schedule_end":     end,
+	} {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO gateway_settings(key,value,updated_at) VALUES(?,?,?)
 			 ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, key, value, time.Now().Unix()); err != nil {
