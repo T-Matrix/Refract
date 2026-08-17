@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -183,6 +184,10 @@ func (a *adminServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasPrefix(path, "/_admin/api/backups/") && path != "/_admin/api/backups/config" && path != "/_admin/api/backups/import" {
 		a.handleBackupItem(w, r)
+		return
+	}
+	if strings.HasPrefix(path, "/_admin/api/rules/") && strings.Contains(strings.TrimPrefix(path, "/_admin/api/rules/"), "/quota") {
+		a.handleRuleQuota(w, r)
 		return
 	}
 	if strings.HasPrefix(path, "/_admin/api/rules/") {
@@ -439,7 +444,8 @@ func (a *adminServer) handleRules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var payload struct {
-		DomainSuffix string `json:"domain_suffix"`
+		DomainSuffix string   `json:"domain_suffix"`
+		QuotaGB      *float64 `json:"quota_gb"`
 	}
 	if err := decodeAdminJSON(w, r, &payload); err != nil {
 		a.writeError(w, http.StatusBadRequest, "invalid rule request")
@@ -458,12 +464,95 @@ func (a *adminServer) handleRules(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if payload.QuotaGB != nil {
+		if mode != proxyModeWhitelist {
+			a.writeError(w, http.StatusBadRequest, "traffic quota is only available in whitelist mode")
+			return
+		}
+		rule.QuotaBytes, err = domainQuotaBytes(*payload.QuotaGB)
+		if err != nil {
+			a.writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	if _, err := a.store.UpsertProxyRule(r.Context(), rule); err != nil || a.gateway.reloadProxyPolicy(r.Context()) != nil {
 		a.writeError(w, http.StatusInternalServerError, "rule creation failed")
 		return
 	}
 	a.auditRequest(r, "policy.rule.create", rule.DomainSuffix, "action="+rule.Action, true)
 	a.writeJSON(w, http.StatusCreated, a.gateway.policy.Load())
+}
+
+func domainQuotaBytes(gigabytes float64) (int64, error) {
+	const maxQuotaGB = 1 << 20
+	if math.IsNaN(gigabytes) || math.IsInf(gigabytes, 0) || gigabytes < 0 || gigabytes > maxQuotaGB {
+		return 0, errors.New("quota must be between 0 and 1048576 GB")
+	}
+	if gigabytes == 0 {
+		return 0, nil
+	}
+	bytes := math.Round(gigabytes * float64(int64(1)<<30))
+	if bytes < 1 {
+		return 0, errors.New("quota is too small")
+	}
+	return int64(bytes), nil
+}
+
+func (a *adminServer) handleRuleQuota(w http.ResponseWriter, r *http.Request) {
+	if !sameOriginRequest(r) {
+		a.writeError(w, http.StatusForbidden, "same-origin request required")
+		return
+	}
+	remainder := strings.TrimPrefix(r.URL.Path, "/_admin/api/rules/")
+	parts := strings.Split(remainder, "/")
+	if len(parts) < 2 || len(parts) > 3 || parts[1] != "quota" {
+		a.writeError(w, http.StatusNotFound, "quota route not found")
+		return
+	}
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || id < 1 {
+		a.writeError(w, http.StatusBadRequest, "invalid rule id")
+		return
+	}
+	if len(parts) == 3 {
+		if parts[2] != "reset" || r.Method != http.MethodPost {
+			a.methodNotAllowed(w, http.MethodPost)
+			return
+		}
+		if err := a.gateway.quota.Reset(r.Context(), id); err != nil {
+			a.writeError(w, http.StatusNotFound, "limited whitelist rule not found")
+			return
+		}
+		a.auditRequest(r, "policy.rule.quota.reset", strconv.FormatInt(id, 10), "", true)
+		a.writeJSON(w, http.StatusOK, a.gateway.policy.Load())
+		return
+	}
+	if r.Method != http.MethodPut {
+		a.methodNotAllowed(w, http.MethodPut)
+		return
+	}
+	var payload struct {
+		QuotaGB *float64 `json:"quota_gb"`
+	}
+	if err := decodeAdminJSON(w, r, &payload); err != nil || payload.QuotaGB == nil {
+		a.writeError(w, http.StatusBadRequest, "invalid quota request")
+		return
+	}
+	quotaBytes, err := domainQuotaBytes(*payload.QuotaGB)
+	if err != nil {
+		a.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := a.store.SetProxyRuleQuota(r.Context(), id, quotaBytes); err != nil {
+		a.writeError(w, http.StatusNotFound, "whitelist rule not found")
+		return
+	}
+	if err := a.gateway.reloadProxyPolicy(r.Context()); err != nil {
+		a.writeError(w, http.StatusInternalServerError, "quota update failed")
+		return
+	}
+	a.auditRequest(r, "policy.rule.quota", strconv.FormatInt(id, 10), fmt.Sprintf("quota_bytes=%d", quotaBytes), true)
+	a.writeJSON(w, http.StatusOK, a.gateway.policy.Load())
 }
 
 func (a *adminServer) handleDomainRule(w http.ResponseWriter, r *http.Request) {

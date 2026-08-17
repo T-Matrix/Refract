@@ -35,6 +35,7 @@ type Gateway struct {
 	runtime     *runtimeConfigManager
 	limiter     *requestLimiter
 	bandwidth   *bandwidthLimiter
+	quota       *domainQuotaManager
 	meter       *rateMeter
 	connections *connectionTracker
 	started     time.Time
@@ -178,6 +179,8 @@ func NewChecked(cfg Config) (*Gateway, error) {
 		gateway.admin = admin
 		gateway.geo = newGeoTracker(store, cfg)
 		gateway.meter.SetClientPeakSink(gateway.geo.ObservePeak)
+		gateway.quota = newDomainQuotaManager(store)
+		gateway.quota.Sync(policy)
 	}
 	return gateway, nil
 }
@@ -197,6 +200,9 @@ func (g *Gateway) Close() {
 	}
 	if g.geo != nil {
 		g.geo.Close()
+	}
+	if g.quota != nil {
+		g.quota.Close()
 	}
 	if g.transport != nil {
 		g.transport.CloseIdleConnections()
@@ -251,20 +257,36 @@ func (g *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		writeGatewayError(writer, http.StatusForbidden, "target is not allowed")
 		return
 	}
+	client := adminClientIP(request, g.cfg.TrustProxyHeaders)
 	policy := g.policy.Load()
 	policyCheckedAt := time.Now()
-	if !policy.AllowsAt(target, policyCheckedAt) {
+	allowed, quotaRule := policy.evaluateAt(target, policyCheckedAt)
+	if !allowed {
 		g.blocked.Add(1)
 		if g.telemetry != nil {
 			g.telemetry.Record(telemetryEvent{
-				Timestamp: time.Now(), Host: target.Host, Scheme: target.Scheme, Method: request.Method,
+				Timestamp: time.Now(), ClientIP: client, Host: target.Host, Scheme: target.Scheme, Method: request.Method,
 				Path: target.EscapedPath(), Category: "policy", Status: http.StatusForbidden,
 			})
 		}
 		writeGatewayError(writer, http.StatusForbidden, "target is blocked by proxy policy")
 		return
 	}
-	client := adminClientIP(request, g.cfg.TrustProxyHeaders)
+	var quota *domainQuotaAccount
+	if quotaRule != nil {
+		quota = quotaRule.quota
+	}
+	if quota != nil && quota.Exhausted() {
+		g.blocked.Add(1)
+		if g.telemetry != nil {
+			g.telemetry.Record(telemetryEvent{
+				Timestamp: time.Now(), ClientIP: client, Host: target.Host, Scheme: target.Scheme, Method: request.Method,
+				Path: target.EscapedPath(), Category: "quota", Status: http.StatusForbidden,
+			})
+		}
+		writeGatewayError(writer, http.StatusForbidden, "domain traffic quota exhausted")
+		return
+	}
 	if !g.limiter.Acquire(client) {
 		g.blocked.Add(1)
 		writer.Header().Set("Retry-After", "5")
@@ -320,7 +342,7 @@ func (g *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	}
 	loggingWriter := &accessResponseWriter{
 		ResponseWriter: writer, meter: g.meter, flow: flow, clientIP: client,
-		bandwidth: g.bandwidth, context: request.Context(),
+		bandwidth: g.bandwidth, quota: quota, context: request.Context(),
 	}
 	proxiedRequest := request.WithContext(context.WithValue(request.Context(), targetContextKey{}, info))
 	defer g.finalizeProxyRequest(request, target, path, client, started, loggingWriter, flow)
@@ -345,6 +367,7 @@ func (g *Gateway) finalizeProxyRequest(request *http.Request, target *url.URL, p
 		g.telemetry.RecordCompleted(telemetryEvent{
 			FlowID:     flow.id,
 			Timestamp:  time.Now(),
+			ClientIP:   client,
 			Host:       target.Host,
 			Scheme:     target.Scheme,
 			Method:     request.Method,
@@ -357,7 +380,7 @@ func (g *Gateway) finalizeProxyRequest(request *http.Request, target *url.URL, p
 		}, g.connections, flow)
 	}
 	if g.geo != nil {
-		g.geo.ObserveRequest(client, bytesOut)
+		g.geo.ObserveClient(client)
 	}
 }
 
@@ -509,6 +532,7 @@ type accessResponseWriter struct {
 	flow      *connectionFlow
 	clientIP  string
 	bandwidth *bandwidthLimiter
+	quota     *domainQuotaAccount
 	context   context.Context
 }
 
@@ -528,7 +552,7 @@ func (w *accessResponseWriter) Write(data []byte) (int, error) {
 	if w.status == 0 {
 		w.status = http.StatusOK
 	}
-	written, err := writeWithBandwidthLimit(w.context, w.bandwidth, w.clientIP, data, w.ResponseWriter.Write)
+	written, err := writeMeteredPayload(w.context, w.bandwidth, w.quota, w.clientIP, data, w.ResponseWriter.Write)
 	w.bytes += int64(written)
 	w.meter.AddDownload(int64(written))
 	w.meter.AddClientDownload(w.clientIP, int64(written))
@@ -563,7 +587,7 @@ func (w *accessResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	}
 	metered := &meteredConn{
 		Conn: connection, meter: w.meter, flow: w.flow, clientIP: w.clientIP,
-		bandwidth: w.bandwidth, context: w.context,
+		bandwidth: w.bandwidth, quota: w.quota, context: w.context,
 	}
 	return metered, bufio.NewReadWriter(buffered.Reader, bufio.NewWriter(metered)), nil
 }

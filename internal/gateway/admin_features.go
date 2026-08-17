@@ -258,6 +258,8 @@ func (a *adminServer) handleBackupItem(w http.ResponseWriter, r *http.Request) {
 			a.writeError(w, http.StatusInternalServerError, "backup restore failed")
 			return
 		}
+		a.gateway.connections.CancelAll()
+		a.gateway.quota.Replace(a.gateway.policy.Load())
 		a.gateway.telegram.Wake()
 		a.gateway.backups.Wake()
 		a.auditRequest(r, "backup.restore", name, "safety="+safety.Name, true)

@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	geographyRetention = 30 * 24 * time.Hour
+	geographyRetention = 90 * 24 * time.Hour
 	geoSuccessTTL      = 30 * 24 * time.Hour
 	geoFailureTTL      = time.Hour
 	geoQueueSize       = 4096
@@ -117,8 +117,10 @@ func (g *geoTracker) Close() {
 	})
 }
 
-func (g *geoTracker) ObserveRequest(ip string, bytesOut int64) {
-	g.observe(clientGeoEvent{IP: ip, Timestamp: time.Now(), Requests: 1, BytesOut: max(0, bytesOut)})
+func (g *geoTracker) ObserveClient(ip string) {
+	if normalized, ok := publicClientIP(ip); ok {
+		g.queueLookup(normalized)
+	}
 }
 
 func (g *geoTracker) ObservePeak(ip string, bytesPerSecond int64) {

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"sort"
@@ -25,6 +26,7 @@ const (
 type telemetryEvent struct {
 	FlowID     string
 	Timestamp  time.Time
+	ClientIP   string
 	Host       string
 	Scheme     string
 	Method     string
@@ -163,6 +165,8 @@ func openTelemetryStore(path, username, passwordHash string) (*telemetryStore, e
 			domain_suffix TEXT NOT NULL DEFAULT '',
 			path_prefix TEXT NOT NULL DEFAULT '',
 			enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+			quota_bytes INTEGER NOT NULL DEFAULT 0 CHECK(quota_bytes >= 0),
+			quota_used_bytes INTEGER NOT NULL DEFAULT 0 CHECK(quota_used_bytes >= 0),
 			created_at INTEGER NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS telegram_settings (
@@ -230,6 +234,15 @@ func openTelemetryStore(path, username, passwordHash string) (*telemetryStore, e
 			return nil, fmt.Errorf("initialize telemetry database: %w", err)
 		}
 	}
+	for column, definition := range map[string]string{
+		"quota_bytes":      "INTEGER NOT NULL DEFAULT 0 CHECK(quota_bytes >= 0)",
+		"quota_used_bytes": "INTEGER NOT NULL DEFAULT 0 CHECK(quota_used_bytes >= 0)",
+	} {
+		if err := ensureSQLiteColumn(db, "proxy_rules", column, definition); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("migrate proxy rule quota: %w", err)
+		}
+	}
 	if path != ":memory:" && !strings.HasPrefix(path, "file:") {
 		if err := os.Chmod(path, 0600); err != nil {
 			_ = db.Close()
@@ -262,6 +275,35 @@ func openTelemetryStore(path, username, passwordHash string) (*telemetryStore, e
 	store := &telemetryStore{db: db, events: make(chan telemetryEvent, telemetryQueueSize), done: make(chan struct{})}
 	go store.runWriter()
 	return store, nil
+}
+
+func ensureSQLiteColumn(db *sql.DB, table, column, definition string) error {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid int
+		var name, dataType string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if name == column {
+			found = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	_, err = db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + definition)
+	return err
 }
 
 func (s *telemetryStore) Close() {
@@ -306,6 +348,7 @@ func (s *telemetryStore) RecordCompleted(event telemetryEvent, connections *conn
 
 func (s *telemetryStore) prepareEvent(event telemetryEvent) (telemetryEvent, bool) {
 	event.Host = strings.TrimSpace(event.Host)
+	event.ClientIP = normalizeTelemetryClientIP(event.ClientIP)
 	event.Path, _, _ = strings.Cut(event.Path, "?")
 	event.Path, _, _ = strings.Cut(event.Path, "#")
 	if len(event.Host) > 255 || event.Host == "" || len(event.Method) > 16 {
@@ -329,7 +372,11 @@ func (s *telemetryStore) enqueueEventLocked(event telemetryEvent) {
 	case s.events <- event:
 		s.pending = append(s.pending, event)
 	default:
-		s.dropped.Add(1)
+		// Preserve accounting under bursts instead of silently dropping a
+		// completed request when the asynchronous queue is temporarily full.
+		if err := s.writeBatch([]telemetryEvent{event}); err != nil {
+			s.dropped.Add(1)
+		}
 	}
 }
 
@@ -406,16 +453,43 @@ func (s *telemetryStore) writeBatch(events []telemetryEvent) error {
 		); err != nil {
 			return err
 		}
+		if event.ClientIP != "" {
+			hour := event.Timestamp.Truncate(time.Hour).Unix()
+			if _, err := tx.Exec(
+				`INSERT INTO client_geo_hours(hour,ip,requests,bytes_out,peak_bps,last_seen)
+				 VALUES(?,?,1,?,0,?)
+				 ON CONFLICT(hour,ip) DO UPDATE SET
+				 requests=requests+1,
+				 bytes_out=bytes_out+excluded.bytes_out,
+				 last_seen=MAX(last_seen,excluded.last_seen)`,
+				hour, event.ClientIP, event.BytesOut, event.Timestamp.Unix(),
+			); err != nil {
+				return err
+			}
+		}
 	}
 	return tx.Commit()
 }
 
+func normalizeTelemetryClientIP(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "unknown" {
+		return raw
+	}
+	ip := net.ParseIP(raw)
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
+}
+
 func (s *telemetryStore) cleanup() {
 	cutoff := time.Now().Add(-requestLogTTL).Unix()
+	trafficCutoff := reportingPeriodStart(90 * 24 * time.Hour)
 	_, _ = s.db.Exec(`DELETE FROM request_logs WHERE timestamp < ?`, cutoff)
 	_, _ = s.db.Exec(`DELETE FROM request_logs WHERE id NOT IN (SELECT id FROM request_logs ORDER BY id DESC LIMIT ?)`, requestLogLimit)
-	_, _ = s.db.Exec(`DELETE FROM traffic_minutes WHERE minute < ?`, time.Now().Add(-90*24*time.Hour).Unix())
-	_, _ = s.db.Exec(`DELETE FROM client_geo_hours WHERE hour < ?`, time.Now().Add(-geographyRetention).Unix())
+	_, _ = s.db.Exec(`DELETE FROM traffic_minutes WHERE minute < ?`, trafficCutoff)
+	_, _ = s.db.Exec(`DELETE FROM client_geo_hours WHERE hour < ?`, trafficCutoff)
 	_, _ = s.db.Exec(`DELETE FROM geo_ip_cache WHERE looked_up < ? AND ip NOT IN (SELECT DISTINCT ip FROM client_geo_hours)`, time.Now().Add(-90*24*time.Hour).Unix())
 	_, _ = s.db.Exec(`DELETE FROM audit_logs WHERE timestamp < ?`, time.Now().Add(-auditLogTTL).Unix())
 }
@@ -468,16 +542,19 @@ func (s *telemetryStore) Geography(ctx context.Context, period time.Duration) (g
 	if period < time.Hour || period > geographyRetention {
 		period = 24 * time.Hour
 	}
+	return s.geographySince(ctx, period, reportingPeriodStart(period))
+}
+
+func (s *telemetryStore) geographySince(ctx context.Context, period time.Duration, since int64) (geographySnapshot, error) {
 	snapshot := geographySnapshot{
 		PeriodHours: int64(period / time.Hour), Regions: []geoRegionSummary{}, IPs: []geoIPSummary{},
 	}
-	since := time.Now().Add(-period).Truncate(time.Hour).Unix()
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT d.ip,SUM(d.requests),SUM(d.bytes_out),MAX(d.peak_bps),MAX(d.last_seen),
 		 COALESCE(c.country,''),COALESCE(c.country_code,''),COALESCE(c.region,''),
 		 COALESCE(c.latitude,0),COALESCE(c.longitude,0)
 		 FROM client_geo_hours d LEFT JOIN geo_ip_cache c ON c.ip=d.ip
-		 WHERE d.hour>=? GROUP BY d.ip ORDER BY MAX(d.peak_bps) DESC LIMIT 5000`, since,
+		 WHERE d.hour>=? GROUP BY d.ip ORDER BY MAX(d.peak_bps) DESC`, since,
 	)
 	if err != nil {
 		return geographySnapshot{}, err
@@ -492,15 +569,15 @@ func (s *telemetryStore) Geography(ctx context.Context, period time.Duration) (g
 			return geographySnapshot{}, err
 		}
 		if item.CountryCode == "" {
+			item.Label = "待定位"
 			snapshot.UnlocatedIPs++
+			snapshot.IPs = append(snapshot.IPs, item)
 			continue
 		}
 		snapshot.LocatedIPs++
 		key, mapName, label, province := geographyRegion(item.Country, item.CountryCode, rawRegion)
 		item.Label, item.Province = label, province
-		if len(snapshot.IPs) < 200 {
-			snapshot.IPs = append(snapshot.IPs, item)
-		}
+		snapshot.IPs = append(snapshot.IPs, item)
 		region := regions[key]
 		if region == nil {
 			region = &geoRegionSummary{
@@ -521,6 +598,15 @@ func (s *telemetryStore) Geography(ctx context.Context, period time.Duration) (g
 	}
 	for _, region := range regions {
 		snapshot.Regions = append(snapshot.Regions, *region)
+	}
+	sort.Slice(snapshot.IPs, func(i, j int) bool {
+		if snapshot.IPs[i].PeakBPS == snapshot.IPs[j].PeakBPS {
+			return snapshot.IPs[i].BytesOut > snapshot.IPs[j].BytesOut
+		}
+		return snapshot.IPs[i].PeakBPS > snapshot.IPs[j].PeakBPS
+	})
+	if len(snapshot.IPs) > 200 {
+		snapshot.IPs = snapshot.IPs[:200]
 	}
 	sort.Slice(snapshot.Regions, func(i, j int) bool {
 		if snapshot.Regions[i].PeakBPS == snapshot.Regions[j].PeakBPS {

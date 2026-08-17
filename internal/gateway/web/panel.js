@@ -8,7 +8,8 @@
     policy: null, policyTimer: null, telegram: null, turnstile: null, turnstileWidget: null, turnstileToken: '', runtimeConfig: null,
     report: null, reportPeriod: '24h', reportLiveChart: null, reportTrendChart: null, reportRegionChart: null,
     liveSeries: [], backups: null, update: null, currentRelease: null, branding: null, settingsSection: 'settings-security',
-    requestPage: 1, requestPageSize: 20, requestStatus: '', requestTotalPages: 1, requestLoading: false
+    requestPage: 1, requestPageSize: 20, requestStatus: '', requestTotalPages: 1, requestLoading: false,
+    quotaRule: null
   };
   let confirmResolver = null;
   const viewMeta = {
@@ -37,6 +38,13 @@
     let index = 0;
     while (size >= 1024 && index < units.length - 1) { size /= 1024; index += 1; }
     return `${size >= 10 || index === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[index]}`;
+  }
+
+  function formatQuotaBytes(value) {
+    const bytes = Math.max(0, Number(value) || 0);
+    if (bytes < 1024 ** 3) return formatBytes(bytes);
+    const units = bytes >= 1024 ** 4 ? ['TB', 1024 ** 4] : ['GB', 1024 ** 3];
+    return `${new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2 }).format(bytes / units[1])} ${units[0]}`;
   }
 
   function formatNumber(value) { return new Intl.NumberFormat('zh-CN').format(Number(value) || 0); }
@@ -741,6 +749,10 @@
     document.getElementById('report-errors').textContent = formatNumber(report.errors);
     const errorRate = Number(report.requests) > 0 ? Number(report.errors) / Number(report.requests) * 100 : 0;
     document.getElementById('report-error-rate').textContent = `错误率 ${errorRate.toFixed(errorRate >= 10 ? 0 : 1)}%`;
+    document.getElementById('report-target-total').textContent = `合计 ${formatBytes(report.bytes_out)}`;
+    const historical = Number(report.unattributed_bytes_out) || 0;
+    document.getElementById('report-client-total').textContent = historical > 0 ?
+      `合计 ${formatBytes(report.bytes_out)} · 含 ${formatBytes(historical)} 旧数据` : `合计 ${formatBytes(report.bytes_out)}`;
 
     const targetBody = document.getElementById('report-targets-table');
     const targetEmpty = document.getElementById('report-targets-empty');
@@ -766,7 +778,7 @@
       report.top_clients.forEach((client) => {
         const row = document.createElement('tr');
         [el('td', 'ip-address', client.ip), el('td', '', client.label || '未定位'), el('td', '', formatNumber(client.requests)),
-          el('td', '', formatBytes(client.bytes_out)), el('td', 'peak-rate', `${formatBytes(client.peak_bps)}/s`)].forEach((cell) => row.append(cell));
+          el('td', '', formatBytes(client.bytes_out)), el('td', 'peak-rate', client.ip === '-' ? '—' : `${formatBytes(client.peak_bps)}/s`)].forEach((cell) => row.append(cell));
         fragment.append(row);
       });
       clientBody.replaceChildren(fragment);
@@ -849,7 +861,7 @@
         peak: Number(region.peak_bps) || 0,
         uniqueIPs: Number(region.unique_ips) || 0
       }));
-      const ipData = ips.filter((item) => Number.isFinite(Number(item.latitude)) && Number.isFinite(Number(item.longitude))).map((item) => ({
+      const ipData = ips.filter((item) => item.country_code && Number.isFinite(Number(item.latitude)) && Number.isFinite(Number(item.longitude))).map((item) => ({
         name: item.ip,
         value: [Number(item.longitude), Number(item.latitude), Number(item.peak_bps) || 0],
         label: item.label,
@@ -1064,8 +1076,12 @@
     document.getElementById('rule-list-title').textContent = mode === 'off' ? '域名名单' : modeLabel;
     document.getElementById('rule-count').textContent = `${formatNumber(rules.length)} 个域名`;
     const domainInput = document.getElementById('rule-domain');
+    const quotaField = document.getElementById('rule-quota-field');
+    const quotaInput = document.getElementById('rule-quota');
     const addButton = document.getElementById('rule-add');
     domainInput.disabled = mode === 'off';
+    quotaField.hidden = mode !== 'whitelist';
+    quotaInput.disabled = mode !== 'whitelist';
     addButton.disabled = mode === 'off';
     addButton.querySelector('span').textContent = mode === 'blacklist' ? '加入黑名单' : mode === 'whitelist' ? '加入白名单' : '选择模式后添加';
     const body = document.getElementById('rules-table');
@@ -1082,7 +1098,32 @@
     rules.forEach((rule) => {
       const row = document.createElement('tr');
       const domain = el('td', 'rule-domain', rule.domain_suffix);
-      const action = document.createElement('td');
+      const quotaCell = el('td', 'quota-cell');
+      const quotaBytes = Number(rule.quota_bytes) || 0;
+      const quotaUsed = Number(rule.quota_used_bytes) || 0;
+      if (quotaBytes > 0) {
+        const quotaSummary = el('div', `quota-summary${rule.quota_reached ? ' reached' : ''}`);
+        const labels = document.createElement('span');
+        labels.append(el('strong', '', rule.quota_reached ? '已达上限' : `${formatBytes(quotaUsed)} / ${formatQuotaBytes(quotaBytes)}`));
+        labels.append(el('small', '', `剩余 ${formatQuotaBytes(Math.max(0, quotaBytes - quotaUsed))}`));
+        const progress = el('progress', 'quota-progress');
+        progress.max = 100;
+        progress.value = Math.min(100, quotaBytes > 0 ? quotaUsed / quotaBytes * 100 : 0);
+        quotaSummary.append(labels, progress);
+        quotaCell.append(quotaSummary);
+      } else {
+        quotaCell.append(el('span', 'unlimited-label', mode === 'whitelist' ? '不限额' : '—'));
+      }
+      const action = el('td', 'rule-actions');
+      if (mode === 'whitelist') {
+        const configure = el('button', 'icon-button');
+        configure.type = 'button';
+        configure.title = '设置下行额度';
+        configure.setAttribute('aria-label', `设置 ${rule.domain_suffix} 的下行额度`);
+        configure.innerHTML = '<i data-lucide="gauge"></i>';
+        configure.addEventListener('click', () => openQuotaDialog(rule));
+        action.append(configure);
+      }
       const remove = el('button', 'icon-button danger-icon');
       remove.type = 'button';
       remove.title = '删除规则';
@@ -1090,12 +1131,86 @@
       remove.innerHTML = '<i data-lucide="trash-2"></i>';
       remove.addEventListener('click', () => deleteRule(rule.id));
       action.append(remove);
-      [domain, el('td', '', formatTime(rule.created_at)), action].forEach((cell) => row.append(cell));
+      [domain, quotaCell, el('td', '', formatTime(rule.created_at)), action].forEach((cell) => row.append(cell));
       fragment.append(row);
     });
     body.replaceChildren(fragment);
     window.lucide?.createIcons();
     if (state.snapshot) renderCompactTargets(state.snapshot.targets);
+  }
+
+  function openQuotaDialog(rule) {
+    state.quotaRule = rule;
+    const quotaBytes = Number(rule.quota_bytes) || 0;
+    const quotaUsed = Number(rule.quota_used_bytes) || 0;
+    document.getElementById('quota-dialog-domain').textContent = rule.domain_suffix;
+    document.getElementById('quota-unlimited').checked = quotaBytes <= 0;
+    document.getElementById('quota-value').value = quotaBytes > 0 ? (quotaBytes / (1024 ** 3)).toFixed(2).replace(/\.?0+$/, '') : '';
+    document.getElementById('quota-used-label').textContent = `已用 ${formatBytes(quotaUsed)}`;
+    document.getElementById('quota-remaining-label').textContent = `剩余 ${formatQuotaBytes(Math.max(0, quotaBytes - quotaUsed))}`;
+    const progress = document.getElementById('quota-progress');
+    progress.value = Math.min(100, quotaBytes > 0 ? quotaUsed / quotaBytes * 100 : 0);
+    document.getElementById('quota-usage').classList.toggle('reached', quotaBytes > 0 && quotaUsed >= quotaBytes);
+    document.getElementById('quota-reset').disabled = quotaBytes <= 0 || quotaUsed <= 0;
+    document.getElementById('quota-error').hidden = true;
+    updateQuotaDialogFields();
+    const dialog = document.getElementById('quota-dialog');
+    if (!dialog.open) dialog.showModal();
+    window.lucide?.createIcons();
+  }
+
+  function updateQuotaDialogFields() {
+    const unlimited = document.getElementById('quota-unlimited').checked;
+    document.getElementById('quota-value').disabled = unlimited;
+    document.getElementById('quota-input-field').hidden = unlimited;
+    document.getElementById('quota-usage').hidden = unlimited || Number(state.quotaRule?.quota_bytes) <= 0;
+  }
+
+  async function saveQuota() {
+    const error = document.getElementById('quota-error');
+    const submit = document.querySelector('#quota-form button[type="submit"]');
+    error.hidden = true;
+    const unlimited = document.getElementById('quota-unlimited').checked;
+    const input = document.getElementById('quota-value');
+    if (!unlimited && !input.reportValidity()) return;
+    const quotaGB = unlimited ? 0 : Number(input.value);
+    if (!unlimited && (!Number.isFinite(quotaGB) || quotaGB <= 0)) {
+      error.textContent = '请输入大于 0 的下行额度';
+      error.hidden = false;
+      return;
+    }
+    submit.disabled = true;
+    try {
+      const policy = await api(`/_admin/api/rules/${state.quotaRule.id}/quota`, jsonOptions('PUT', { quota_gb: quotaGB }));
+      document.getElementById('quota-dialog').close();
+      renderPolicy(policy);
+      toast(unlimited ? '已设为不限额' : `下行额度已设为 ${quotaGB} GB`);
+    } catch (failure) {
+      error.textContent = '额度保存失败，请检查输入后重试';
+      error.hidden = false;
+    } finally {
+      submit.disabled = false;
+    }
+  }
+
+  async function resetQuotaUsage() {
+    const rule = state.quotaRule;
+    const reset = document.getElementById('quota-reset');
+    reset.disabled = true;
+    document.getElementById('quota-dialog').close();
+    const confirmed = await confirmAction({
+      title: '重置域名已用流量', message: `将 ${rule.domain_suffix} 的累计下行用量清零，额度本身保持不变。`,
+      confirmLabel: '确认重置', icon: 'rotate-ccw'
+    });
+    if (!confirmed) {
+      openQuotaDialog(rule);
+      return;
+    }
+    try {
+      const policy = await api(`/_admin/api/rules/${rule.id}/quota/reset`, jsonOptions('POST', {}));
+      renderPolicy(policy);
+      toast('已用流量已重置');
+    } catch (failure) { toast('额度重置失败'); }
   }
 
   async function updateDomainAccess(domain, access, button) {
@@ -1128,6 +1243,7 @@
   const auditActionLabels = {
     'session.login': '管理员登录', 'session.logout': '退出登录', 'account.password': '修改密码',
     'policy.mode': '切换访问模式', 'policy.rule.create': '添加域名规则', 'policy.rule.delete': '删除域名规则',
+    'policy.rule.quota': '修改域名额度', 'policy.rule.quota.reset': '重置域名用量',
     'policy.domain.quick': '快捷域名规则', 'policy.schedule': '修改开放时段', 'connection.terminate': '断开实时连接',
     'telegram.settings': '修改 Telegram', 'telegram.test': '测试 Telegram',
     'backup.auto': '自动备份', 'backup.create': '创建备份', 'backup.import': '导入备份',
@@ -1429,6 +1545,9 @@
       const live = await api('/_admin/api/live');
       renderLive(live);
       if (state.view === 'connections') await refreshConnections();
+      if (state.view === 'rules' && !document.getElementById('quota-dialog').open) {
+        renderPolicy(await api('/_admin/api/policy'));
+      }
     } catch (failure) { /* dashboard refresh handles session failures */ }
     finally { state.liveRefreshing = false; }
   }
@@ -1745,6 +1864,18 @@
     document.getElementById('confirm-dialog').addEventListener('click', (event) => {
       if (event.target === event.currentTarget) settleConfirmation(false);
     });
+    document.getElementById('quota-dialog-close').addEventListener('click', () => document.getElementById('quota-dialog').close());
+    document.getElementById('quota-dialog').addEventListener('cancel', () => { state.quotaRule = null; });
+    document.getElementById('quota-dialog').addEventListener('close', () => { state.quotaRule = null; });
+    document.getElementById('quota-dialog').addEventListener('click', (event) => {
+      if (event.target === event.currentTarget) event.currentTarget.close();
+    });
+    document.getElementById('quota-unlimited').addEventListener('change', updateQuotaDialogFields);
+    document.getElementById('quota-form').addEventListener('submit', (event) => {
+      event.preventDefault();
+      saveQuota();
+    });
+    document.getElementById('quota-reset').addEventListener('click', resetQuotaUsage);
     document.addEventListener('keydown', (event) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
@@ -1855,7 +1986,9 @@
       error.hidden = true;
       try {
         const policy = await api('/_admin/api/rules', jsonOptions('POST', {
-          domain_suffix: document.getElementById('rule-domain').value.trim()
+          domain_suffix: document.getElementById('rule-domain').value.trim(),
+          quota_gb: state.policy?.mode === 'whitelist' && document.getElementById('rule-quota').value !== '' ?
+            Number(document.getElementById('rule-quota').value) : null
         }));
         renderPolicy(policy);
         form.reset();

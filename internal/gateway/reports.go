@@ -8,23 +8,25 @@ import (
 )
 
 type reportSnapshot struct {
-	PeriodHours int64              `json:"period_hours"`
-	Requests    int64              `json:"requests"`
-	BytesIn     int64              `json:"bytes_in"`
-	BytesOut    int64              `json:"bytes_out"`
-	Errors      int64              `json:"errors"`
-	Targets     int64              `json:"targets_count"`
-	Timeline    []trafficPoint     `json:"timeline"`
-	TopTargets  []targetSummary    `json:"top_targets"`
-	TopClients  []geoIPSummary     `json:"top_clients"`
-	Regions     []geoRegionSummary `json:"regions"`
+	PeriodHours          int64              `json:"period_hours"`
+	Requests             int64              `json:"requests"`
+	BytesIn              int64              `json:"bytes_in"`
+	BytesOut             int64              `json:"bytes_out"`
+	ClientBytesOut       int64              `json:"client_bytes_out"`
+	UnattributedBytesOut int64              `json:"unattributed_bytes_out"`
+	Errors               int64              `json:"errors"`
+	Targets              int64              `json:"targets_count"`
+	Timeline             []trafficPoint     `json:"timeline"`
+	TopTargets           []targetSummary    `json:"top_targets"`
+	TopClients           []geoIPSummary     `json:"top_clients"`
+	Regions              []geoRegionSummary `json:"regions"`
 }
 
 func (s *telemetryStore) Report(ctx context.Context, period time.Duration) (reportSnapshot, error) {
 	if period < time.Hour || period > 90*24*time.Hour {
 		period = 24 * time.Hour
 	}
-	since := time.Now().Add(-period).Unix()
+	since := reportingPeriodStart(period)
 	bucket := int64(time.Hour / time.Second)
 	if period > 7*24*time.Hour {
 		bucket = int64(24 * time.Hour / time.Second)
@@ -60,19 +62,71 @@ func (s *telemetryStore) Report(ctx context.Context, period time.Duration) (repo
 	if err != nil {
 		return reportSnapshot{}, err
 	}
-	geographyPeriod := min(period, geographyRetention)
-	geography, err := s.Geography(ctx, geographyPeriod)
+	geography, err := s.geographySince(ctx, period, since)
 	if err != nil {
 		return reportSnapshot{}, err
 	}
-	report.TopClients = append(report.TopClients, geography.IPs...)
-	sort.Slice(report.TopClients, func(i, j int) bool { return report.TopClients[i].BytesOut > report.TopClients[j].BytesOut })
-	if len(report.TopClients) > 20 {
-		report.TopClients = report.TopClients[:20]
+	var clientRequests int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(requests),0),COALESCE(SUM(bytes_out),0) FROM client_geo_hours WHERE hour>=?`, since,
+	).Scan(&clientRequests, &report.ClientBytesOut); err != nil {
+		return reportSnapshot{}, err
+	}
+	report.UnattributedBytesOut = max(0, report.BytesOut-report.ClientBytesOut)
+	clientLimit := 20
+	if report.UnattributedBytesOut > 0 {
+		clientLimit--
+	}
+	report.TopClients, err = s.topClients(ctx, since, clientLimit)
+	if err != nil {
+		return reportSnapshot{}, err
+	}
+	if report.UnattributedBytesOut > 0 {
+		report.TopClients = append(report.TopClients, geoIPSummary{
+			IP: "-", Label: "历史未归属（升级前）", Requests: max(0, report.Requests-clientRequests),
+			BytesOut: report.UnattributedBytesOut,
+		})
+		sort.Slice(report.TopClients, func(i, j int) bool { return report.TopClients[i].BytesOut > report.TopClients[j].BytesOut })
+		if len(report.TopClients) > 20 {
+			report.TopClients = report.TopClients[:20]
+		}
 	}
 	report.Regions = append(report.Regions, geography.Regions...)
 	sort.Slice(report.Regions, func(i, j int) bool { return report.Regions[i].BytesOut > report.Regions[j].BytesOut })
 	return report, nil
+}
+
+func reportingPeriodStart(period time.Duration) int64 {
+	return time.Now().Add(-period).Truncate(time.Hour).Unix()
+}
+
+func (s *telemetryStore) topClients(ctx context.Context, since int64, limit int) ([]geoIPSummary, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT d.ip,SUM(d.requests),SUM(d.bytes_out),MAX(d.peak_bps),MAX(d.last_seen),
+		 COALESCE(c.country,''),COALESCE(c.country_code,''),COALESCE(c.region,''),
+		 COALESCE(c.latitude,0),COALESCE(c.longitude,0)
+		 FROM client_geo_hours d LEFT JOIN geo_ip_cache c ON c.ip=d.ip
+		 WHERE d.hour>=? GROUP BY d.ip ORDER BY SUM(d.bytes_out) DESC LIMIT ?`, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]geoIPSummary, 0, limit)
+	for rows.Next() {
+		var item geoIPSummary
+		var region string
+		if err := rows.Scan(&item.IP, &item.Requests, &item.BytesOut, &item.PeakBPS, &item.LastSeen,
+			&item.Country, &item.CountryCode, &region, &item.Latitude, &item.Longitude); err != nil {
+			return nil, err
+		}
+		if item.CountryCode == "" {
+			item.Label = "待定位"
+		} else {
+			_, _, item.Label, item.Province = geographyRegion(item.Country, item.CountryCode, region)
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
 }
 
 func parseReportPeriod(raw string) (time.Duration, bool) {

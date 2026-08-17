@@ -6,11 +6,11 @@
   <meta name="robots" content="noindex,nofollow">
   <title>Refract</title>
   <link rel="icon" href="/_gateway/avatar">
-  <link rel="stylesheet" href="/_admin/assets/app.css?v=1.14.0-20260817">
+  <link rel="stylesheet" href="/_admin/assets/app.css?v=1.15.0-20260817-2">
   <script defer src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"></script>
   <script defer src="/_admin/assets/lucide.min.js"></script>
   <script defer src="/_admin/assets/echarts.min.js"></script>
-  <script defer src="/_admin/assets/panel.js?v=1.14.0-20260817"></script>
+  <script defer src="/_admin/assets/panel.js?v=1.15.0-20260817-2"></script>
 </head>
 <body class="panel-page">
   <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -59,7 +59,7 @@
         <button id="update-button" class="sidebar-update" type="button" disabled title="正在检查更新" aria-label="Refract 版本信息">
           <span class="sidebar-update-copy">
             <strong>Refract</strong>
-            <span class="sidebar-version-row"><span id="current-version">Version 1.14.0</span><i id="update-dot" class="update-dot" hidden></i></span>
+            <span class="sidebar-version-row"><span id="current-version">Version 1.15.0</span><i id="update-dot" class="update-dot" hidden></i></span>
           </span>
           <i id="update-icon" class="sidebar-update-icon" data-lucide="circle-arrow-up" aria-hidden="true"></i>
         </button>
@@ -203,8 +203,8 @@
             <section class="data-section report-chart-section"><div class="section-heading"><div><h2>流量趋势</h2><p id="report-trend-label">按小时聚合</p></div></div><div id="report-trend-chart" class="echart-panel" role="img" aria-label="所选周期流量趋势"></div></section>
           </div>
           <div class="report-table-grid">
-            <section class="data-section table-section"><div class="section-heading"><div><h2>后端排行</h2><p>按下行流量排序</p></div></div><div class="table-scroll"><table><thead><tr><th>后端</th><th>请求</th><th>流量</th><th>错误</th><th>平均耗时</th></tr></thead><tbody id="report-targets-table"></tbody></table></div><p id="report-targets-empty" class="empty-state">暂无后端数据</p></section>
-            <section class="data-section table-section"><div class="section-heading"><div><h2>客户端排行</h2><p>按下行流量排序</p></div></div><div class="table-scroll"><table><thead><tr><th>IP</th><th>位置</th><th>请求</th><th>流量</th><th>峰值</th></tr></thead><tbody id="report-clients-table"></tbody></table></div><p id="report-clients-empty" class="empty-state">暂无客户端数据</p></section>
+            <section class="data-section table-section"><div class="section-heading"><div><h2>后端排行</h2><p>按目标域名聚合，同一客户端可访问多个后端</p></div><span id="report-target-total" class="quiet-label">合计 0 B</span></div><div class="table-scroll"><table><thead><tr><th>后端</th><th>请求</th><th>流量</th><th>错误</th><th>平均耗时</th></tr></thead><tbody id="report-targets-table"></tbody></table></div><p id="report-targets-empty" class="empty-state">暂无后端数据</p></section>
+            <section class="data-section table-section"><div class="section-heading"><div><h2>客户端排行</h2><p>按来源 IP 聚合，同一后端可由多个客户端访问</p></div><span id="report-client-total" class="quiet-label">合计 0 B</span></div><div class="table-scroll"><table><thead><tr><th>IP</th><th>位置</th><th>请求</th><th>流量</th><th>峰值</th></tr></thead><tbody id="report-clients-table"></tbody></table></div><p id="report-clients-empty" class="empty-state">暂无客户端数据</p></section>
           </div>
           <section class="data-section report-regions-section"><div class="section-heading"><div><h2>地域流量分布</h2><p>中国按省份，其他地区按国家</p></div></div><div class="report-region-layout"><div id="report-region-chart" class="echart-panel" role="img" aria-label="地域流量占比图"></div><div class="table-scroll"><table><thead><tr><th>地域</th><th>IP</th><th>流量</th><th>峰值</th></tr></thead><tbody id="report-regions-table"></tbody></table></div></div><p id="report-regions-empty" class="empty-state">暂无地域数据</p></section>
         </section>
@@ -260,6 +260,7 @@
             </div>
             <form id="rule-form" class="rule-form">
               <div><label for="rule-domain">域名后缀</label><input id="rule-domain" type="text" maxlength="253" placeholder="example.com"></div>
+              <div id="rule-quota-field" hidden><label for="rule-quota">下行额度（GB）</label><input id="rule-quota" type="number" min="0.01" max="1048576" step="0.01" inputmode="decimal" placeholder="留空表示不限额"></div>
               <button id="rule-add" class="primary-button compact rule-add" type="submit"><i data-lucide="plus"></i><span>选择模式后添加</span></button>
             </form>
             <p id="rule-error" class="form-error inline-error" role="alert" hidden></p>
@@ -281,7 +282,7 @@
             <div class="section-heading"><div><h2 id="rule-list-title">域名名单</h2><p>匹配域名自身及其子域名</p></div><span id="rule-count" class="quiet-label">0 个域名</span></div>
             <div class="table-scroll">
               <table>
-                <thead><tr><th>域名后缀</th><th>创建时间</th><th aria-label="操作"></th></tr></thead>
+                <thead><tr><th>域名后缀</th><th>下行额度</th><th>创建时间</th><th aria-label="操作"></th></tr></thead>
                 <tbody id="rules-table"></tbody>
               </table>
             </div>
@@ -524,6 +525,28 @@
       <button id="confirm-cancel" class="secondary-button" type="button">取消</button>
       <button id="confirm-accept" class="primary-button" type="button">确认</button>
     </div>
+  </dialog>
+  <dialog id="quota-dialog" class="quota-dialog" aria-labelledby="quota-dialog-title">
+    <form id="quota-form" method="dialog">
+      <div class="quota-dialog-header">
+        <span class="version-dialog-icon" aria-hidden="true"><i data-lucide="gauge"></i></span>
+        <div><h2 id="quota-dialog-title">域名下行额度</h2><p id="quota-dialog-domain"></p></div>
+        <button id="quota-dialog-close" class="icon-button" type="button" aria-label="关闭额度设置" title="关闭"><i data-lucide="x"></i></button>
+      </div>
+      <div class="quota-dialog-body">
+        <label class="toggle-control quota-unlimited-control"><input id="quota-unlimited" type="checkbox"><span aria-hidden="true"></span><b>不限额</b></label>
+        <div id="quota-input-field"><label for="quota-value">累计下行额度（GB）</label><input id="quota-value" type="number" min="0.01" max="1048576" step="0.01" inputmode="decimal" required></div>
+        <div id="quota-usage" class="quota-usage" hidden>
+          <div><span id="quota-used-label">已用 0 B</span><span id="quota-remaining-label">剩余 0 B</span></div>
+          <progress id="quota-progress" max="100" value="0">0%</progress>
+        </div>
+        <p id="quota-error" class="form-error" role="alert" hidden></p>
+      </div>
+      <div class="quota-dialog-actions">
+        <button id="quota-reset" class="secondary-button" type="button"><i data-lucide="rotate-ccw"></i><span>重置已用</span></button>
+        <button class="primary-button" type="submit"><i data-lucide="save"></i><span>保存额度</span></button>
+      </div>
+    </form>
   </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 </body>

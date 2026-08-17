@@ -20,11 +20,16 @@ const (
 )
 
 type proxyRule struct {
-	ID           int64  `json:"id"`
-	Action       string `json:"action"`
-	DomainSuffix string `json:"domain_suffix"`
-	Enabled      bool   `json:"enabled"`
-	CreatedAt    int64  `json:"created_at"`
+	ID                  int64  `json:"id"`
+	Action              string `json:"action"`
+	DomainSuffix        string `json:"domain_suffix"`
+	Enabled             bool   `json:"enabled"`
+	QuotaBytes          int64  `json:"quota_bytes"`
+	QuotaUsedBytes      int64  `json:"quota_used_bytes"`
+	QuotaRemainingBytes int64  `json:"quota_remaining_bytes"`
+	QuotaReached        bool   `json:"quota_reached"`
+	CreatedAt           int64  `json:"created_at"`
+	quota               *domainQuotaAccount
 }
 
 type proxyPolicy struct {
@@ -52,8 +57,19 @@ func (p *proxyPolicy) MarshalJSON() ([]byte, error) {
 	if !next.IsZero() {
 		nextUnix = next.Unix()
 	}
+	rules := append([]proxyRule(nil), p.Rules...)
+	for index := range rules {
+		if rules[index].quota != nil {
+			rules[index].QuotaBytes, rules[index].QuotaUsedBytes = rules[index].quota.Snapshot()
+		}
+		if rules[index].QuotaBytes > 0 {
+			rules[index].QuotaRemainingBytes = max(0, rules[index].QuotaBytes-rules[index].QuotaUsedBytes)
+			rules[index].QuotaReached = rules[index].QuotaUsedBytes >= rules[index].QuotaBytes
+		}
+		rules[index].quota = nil
+	}
 	return json.Marshal(proxyPolicyJSON{
-		Mode: p.Mode, Rules: p.Rules,
+		Mode: p.Mode, Rules: rules,
 		ScheduleEnabled: p.ScheduleEnabled, ScheduleStart: p.ScheduleStart, ScheduleEnd: p.ScheduleEnd,
 		ScheduleOpen: open, ScheduleTimezone: applicationTimezone, ScheduleNextTransition: nextUnix,
 	})
@@ -64,6 +80,9 @@ func (g *Gateway) reloadProxyPolicy(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if g.quota != nil {
+		g.quota.Sync(policy)
+	}
 	g.policy.Store(policy)
 	return nil
 }
@@ -73,20 +92,26 @@ func (p *proxyPolicy) Allows(target *url.URL) bool {
 }
 
 func (p *proxyPolicy) AllowsAt(target *url.URL, now time.Time) bool {
+	allowed, _ := p.evaluateAt(target, now)
+	return allowed
+}
+
+func (p *proxyPolicy) evaluateAt(target *url.URL, now time.Time) (bool, *proxyRule) {
 	if p == nil || p.Mode == proxyModeOff {
-		return p == nil || p.scheduleAllows(now)
+		return p == nil || p.scheduleAllows(now), nil
 	}
 	if !p.scheduleAllows(now) {
-		return false
+		return false, nil
 	}
 	host := normalizeHost(target.Hostname())
 	switch p.Mode {
 	case proxyModeBlacklist:
-		return p.matchingRule(host, "deny") == nil
+		return p.matchingRule(host, "deny") == nil, nil
 	case proxyModeWhitelist:
-		return p.matchingRule(host, "allow") != nil
+		rule := p.matchingRule(host, "allow")
+		return rule != nil, rule
 	default:
-		return true
+		return true, nil
 	}
 }
 
@@ -245,7 +270,7 @@ func (s *telemetryStore) LoadProxyPolicy(ctx context.Context) (*proxyPolicy, err
 	}
 
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id,action,domain_suffix,path_prefix,enabled,created_at FROM proxy_rules ORDER BY id DESC`)
+		`SELECT id,action,domain_suffix,path_prefix,enabled,quota_bytes,quota_used_bytes,created_at FROM proxy_rules ORDER BY id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -255,7 +280,8 @@ func (s *telemetryStore) LoadProxyPolicy(ctx context.Context) (*proxyPolicy, err
 		var rule proxyRule
 		var legacyPath string
 		var enabledInt int
-		if err := rows.Scan(&rule.ID, &rule.Action, &rule.DomainSuffix, &legacyPath, &enabledInt, &rule.CreatedAt); err != nil {
+		if err := rows.Scan(&rule.ID, &rule.Action, &rule.DomainSuffix, &legacyPath, &enabledInt,
+			&rule.QuotaBytes, &rule.QuotaUsedBytes, &rule.CreatedAt); err != nil {
 			return nil, err
 		}
 		if rule.DomainSuffix == "" {
@@ -358,12 +384,24 @@ func (s *telemetryStore) UpsertProxyRule(ctx context.Context, rule proxyRule) (i
 		return 0, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM proxy_rules WHERE domain_suffix=? AND action=?`, rule.DomainSuffix, rule.Action); err != nil {
+	var existingID int64
+	err = tx.QueryRowContext(ctx, `SELECT id FROM proxy_rules WHERE domain_suffix=? AND action=? ORDER BY id DESC LIMIT 1`,
+		rule.DomainSuffix, rule.Action).Scan(&existingID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
 	}
+	if existingID > 0 {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE proxy_rules SET enabled=1,quota_bytes=?,
+			 quota_used_bytes=CASE WHEN ?=0 THEN 0 ELSE quota_used_bytes END WHERE id=?`,
+			rule.QuotaBytes, rule.QuotaBytes, existingID); err != nil {
+			return 0, err
+		}
+		return existingID, tx.Commit()
+	}
 	result, err := tx.ExecContext(ctx,
-		`INSERT INTO proxy_rules(action,domain_suffix,path_prefix,enabled,created_at) VALUES(?,?, '',1,?)`,
-		rule.Action, rule.DomainSuffix, time.Now().Unix())
+		`INSERT INTO proxy_rules(action,domain_suffix,path_prefix,enabled,quota_bytes,quota_used_bytes,created_at)
+		 VALUES(?,?, '',1,?,?,?)`, rule.Action, rule.DomainSuffix, rule.QuotaBytes, rule.QuotaUsedBytes, time.Now().Unix())
 	if err != nil {
 		return 0, err
 	}
@@ -372,6 +410,45 @@ func (s *telemetryStore) UpsertProxyRule(ctx context.Context, rule proxyRule) (i
 		return 0, err
 	}
 	return id, tx.Commit()
+}
+
+func (s *telemetryStore) SetProxyRuleQuota(ctx context.Context, id, quotaBytes int64) error {
+	if id < 1 || quotaBytes < 0 {
+		return errors.New("invalid rule quota")
+	}
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE proxy_rules SET quota_bytes=?,quota_used_bytes=CASE WHEN ?=0 THEN 0 ELSE quota_used_bytes END
+		 WHERE id=? AND action='allow'`, quotaBytes, quotaBytes, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows != 1 {
+		return errors.New("whitelist rule not found")
+	}
+	return nil
+}
+
+func (s *telemetryStore) AddProxyRuleQuotaUsage(id, delta int64) error {
+	if id < 1 || delta == 0 {
+		return nil
+	}
+	_, err := s.db.Exec(
+		`UPDATE proxy_rules SET quota_used_bytes=MAX(0,quota_used_bytes+?) WHERE id=? AND quota_bytes>0`, delta, id)
+	return err
+}
+
+func (s *telemetryStore) ResetProxyRuleQuota(ctx context.Context, id int64) error {
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE proxy_rules SET quota_used_bytes=0 WHERE id=? AND action='allow' AND quota_bytes>0`, id)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows != 1 {
+		return errors.New("limited whitelist rule not found")
+	}
+	return nil
 }
 
 func (s *telemetryStore) DeleteProxyRule(ctx context.Context, id int64) error {

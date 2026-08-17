@@ -403,6 +403,20 @@ func (s *telemetryStore) restoreSQLite(ctx context.Context, path string) error {
 			return err
 		}
 	}
+	var quotaColumns int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('proxy_rules','restored') WHERE name IN ('quota_bytes','quota_used_bytes')`,
+	).Scan(&quotaColumns); err != nil {
+		return err
+	}
+	if quotaColumns == 2 {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE main.proxy_rules SET
+			 quota_bytes=COALESCE((SELECT quota_bytes FROM restored.proxy_rules WHERE restored.proxy_rules.id=main.proxy_rules.id),0),
+			 quota_used_bytes=COALESCE((SELECT quota_used_bytes FROM restored.proxy_rules WHERE restored.proxy_rules.id=main.proxy_rules.id),0)`); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 

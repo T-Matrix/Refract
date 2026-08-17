@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -244,6 +245,65 @@ func TestRuleAPIRequiresModeAndDerivesListFromIt(t *testing.T) {
 	}, cookie, true)
 	if created.Code != http.StatusCreated || gateway.policy.Load().Rules[0].Action != "allow" {
 		t.Fatalf("whitelist rule status=%d body=%s policy=%#v", created.Code, created.Body.String(), gateway.policy.Load())
+	}
+}
+
+func TestWhitelistRuleQuotaAPIConfiguresAndResetsUsage(t *testing.T) {
+	gateway := newAdminTestGateway(t)
+	cookie := loginAdmin(t, gateway)
+	mode := adminRequest(t, gateway, http.MethodPut, "/_admin/api/policy", map[string]string{
+		"mode": proxyModeWhitelist,
+	}, cookie, true)
+	if mode.Code != http.StatusOK {
+		t.Fatalf("whitelist mode status=%d body=%s", mode.Code, mode.Body.String())
+	}
+	created := adminRequest(t, gateway, http.MethodPost, "/_admin/api/rules", map[string]any{
+		"domain_suffix": "limited.invalid", "quota_gb": 2.5,
+	}, cookie, true)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("quota rule status=%d body=%s", created.Code, created.Body.String())
+	}
+	rule := gateway.policy.Load().Rules[0]
+	if rule.QuotaBytes != int64(2.5*float64(int64(1)<<30)) || rule.quota == nil {
+		t.Fatalf("quota rule not configured: %#v", rule)
+	}
+	rule.quota.Reserve(4096)
+
+	updated := adminRequest(t, gateway, http.MethodPut, fmt.Sprintf("/_admin/api/rules/%d/quota", rule.ID), map[string]any{
+		"quota_gb": 1.25,
+	}, cookie, true)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("quota update status=%d body=%s", updated.Code, updated.Body.String())
+	}
+	limit, used := gateway.policy.Load().Rules[0].quota.Snapshot()
+	if limit != int64(1.25*float64(int64(1)<<30)) || used != 4096 {
+		t.Fatalf("quota update limit=%d used=%d", limit, used)
+	}
+
+	reset := adminRequest(t, gateway, http.MethodPost, fmt.Sprintf("/_admin/api/rules/%d/quota/reset", rule.ID), map[string]any{}, cookie, true)
+	if reset.Code != http.StatusOK {
+		t.Fatalf("quota reset status=%d body=%s", reset.Code, reset.Body.String())
+	}
+	_, used = gateway.policy.Load().Rules[0].quota.Snapshot()
+	if used != 0 {
+		t.Fatalf("quota reset used=%d", used)
+	}
+	gateway.policy.Load().Rules[0].quota.Reserve(2048)
+	disabled := adminRequest(t, gateway, http.MethodPut, fmt.Sprintf("/_admin/api/rules/%d/quota", rule.ID), map[string]any{
+		"quota_gb": 0,
+	}, cookie, true)
+	if disabled.Code != http.StatusOK {
+		t.Fatalf("quota disable status=%d body=%s", disabled.Code, disabled.Body.String())
+	}
+	reenabled := adminRequest(t, gateway, http.MethodPut, fmt.Sprintf("/_admin/api/rules/%d/quota", rule.ID), map[string]any{
+		"quota_gb": 1.0,
+	}, cookie, true)
+	if reenabled.Code != http.StatusOK {
+		t.Fatalf("quota re-enable status=%d body=%s", reenabled.Code, reenabled.Body.String())
+	}
+	_, used = gateway.policy.Load().Rules[0].quota.Snapshot()
+	if used != 0 {
+		t.Fatalf("disabled quota usage returned after re-enable: %d", used)
 	}
 }
 

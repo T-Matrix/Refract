@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -252,6 +254,174 @@ func TestAbortedProxyRequestPersistsPartialTraffic(t *testing.T) {
 	}
 	if requests != 1 || bytesOut != wantBytesOut || errorsCount != 0 {
 		t.Fatalf("aborted traffic totals requests=%d bytes_out=%d errors=%d", requests, bytesOut, errorsCount)
+	}
+}
+
+func TestCompletedTrafficUsesOneAccountingEventForTargetAndClient(t *testing.T) {
+	gateway := newAdminTestGateway(t)
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	flow := gateway.connections.Start(cancel, "8.8.8.8", http.MethodGet, "media.example:443", "media.example", "/stream", "stream", "test")
+	flow.AddDownload(987654)
+	gateway.telemetry.RecordCompleted(telemetryEvent{
+		FlowID: flow.id, Timestamp: time.Now(), ClientIP: "8.8.8.8", Host: "media.example:443",
+		Scheme: "https", Method: http.MethodGet, Path: "/stream", Category: "stream", Status: http.StatusOK,
+		BytesOut: flow.downloadTotal.Load(), DurationMS: 100,
+	}, gateway.connections, flow)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var targetBytes, clientBytes int64
+		if err := gateway.telemetry.db.QueryRow(`SELECT COALESCE(SUM(bytes_out),0) FROM traffic_minutes`).Scan(&targetBytes); err != nil {
+			t.Fatal(err)
+		}
+		if err := gateway.telemetry.db.QueryRow(`SELECT COALESCE(SUM(bytes_out),0) FROM client_geo_hours`).Scan(&clientBytes); err != nil {
+			t.Fatal(err)
+		}
+		if targetBytes == 987654 && clientBytes == targetBytes {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("accounting diverged: target=%d client=%d", targetBytes, clientBytes)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	report, err := gateway.telemetry.Report(context.Background(), 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.BytesOut != 987654 || report.ClientBytesOut != report.BytesOut || report.UnattributedBytesOut != 0 {
+		t.Fatalf("report accounting diverged: %#v", report)
+	}
+	if len(report.TopClients) != 1 || report.TopClients[0].IP != "8.8.8.8" || report.TopClients[0].Label != "待定位" {
+		t.Fatalf("unlocated client was omitted: %#v", report.TopClients)
+	}
+}
+
+func TestReportKeepsLegacyTrafficAsUnattributed(t *testing.T) {
+	gateway := newAdminTestGateway(t)
+	minute := time.Now().Truncate(time.Minute).Unix()
+	if _, err := gateway.telemetry.db.Exec(
+		`INSERT INTO traffic_minutes(minute,host,requests,bytes_in,bytes_out,errors,duration_ms)
+		 VALUES(?,?,3,0,?,0,300)`, minute, "legacy.example:443", int64(7654321),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := gateway.telemetry.Report(context.Background(), 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.BytesOut != 7654321 || report.ClientBytesOut != 0 || report.UnattributedBytesOut != report.BytesOut {
+		t.Fatalf("legacy accounting was hidden or reassigned: %#v", report)
+	}
+	if len(report.TopClients) != 1 || report.TopClients[0].Label != "历史未归属（升级前）" ||
+		report.TopClients[0].BytesOut != report.BytesOut || report.TopClients[0].Requests != report.Requests {
+		t.Fatalf("legacy client placeholder is incorrect: %#v", report.TopClients)
+	}
+}
+
+func TestDomainQuotaReservationsAreAtomic(t *testing.T) {
+	account := &domainQuotaAccount{limit: 1 << 20, enforce: true}
+	var wait sync.WaitGroup
+	for range 32 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for range 128 {
+				account.Reserve(1024)
+			}
+		}()
+	}
+	wait.Wait()
+	limit, used := account.Snapshot()
+	if used != limit || used != 1<<20 {
+		t.Fatalf("concurrent quota used=%d limit=%d", used, limit)
+	}
+	if !account.Exhausted() {
+		t.Fatal("quota did not become exhausted")
+	}
+}
+
+func TestDomainQuotaRefundsBytesNotWrittenToClient(t *testing.T) {
+	account := &domainQuotaAccount{limit: 100, enforce: true}
+	written, err := writeMeteredPayload(context.Background(), nil, account, "", make([]byte, 80), func([]byte) (int, error) {
+		return 30, io.ErrUnexpectedEOF
+	})
+	if written != 30 || !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("short write result=(%d,%v), want (30,%v)", written, err, io.ErrUnexpectedEOF)
+	}
+	_, used := account.Snapshot()
+	if used != 30 {
+		t.Fatalf("quota charged %d bytes after a 30-byte write", used)
+	}
+}
+
+func TestWhitelistQuotaStopsStreamAtExactBoundaryAndBlocksNextRequest(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Length", "8192")
+		_, _ = writer.Write([]byte(strings.Repeat("q", 8192)))
+	}))
+	defer upstream.Close()
+
+	gateway := newAdminTestGateway(t)
+	gateway.cfg.DefaultUpstream = mustURL(t, upstream.URL)
+	gateway.cfg.AllowedUpstreams = []TargetPattern{patternFromURL(gateway.cfg.DefaultUpstream)}
+	gateway.resolver = newSafeResolver(time.Minute, true)
+	rule, err := normalizeProxyRule("allow", gateway.cfg.DefaultUpstream.Hostname())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule.QuotaBytes = 4096
+	if _, err := gateway.telemetry.UpsertProxyRule(context.Background(), rule); err != nil {
+		t.Fatal(err)
+	}
+	if err := gateway.telemetry.SetProxyPolicyMode(context.Background(), proxyModeWhitelist); err != nil {
+		t.Fatal(err)
+	}
+	if err := gateway.reloadProxyPolicy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	first := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "https://proxy.test/stream", nil)
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		gateway.ServeHTTP(first, request)
+	}()
+	if recovered != nil && recovered != http.ErrAbortHandler {
+		t.Fatalf("unexpected quota panic: %v", recovered)
+	}
+	if first.Body.Len() != 4096 {
+		t.Fatalf("quota wrote %d bytes, want 4096", first.Body.Len())
+	}
+
+	second := httptest.NewRecorder()
+	gateway.ServeHTTP(second, httptest.NewRequest(http.MethodGet, "https://proxy.test/stream", nil))
+	if second.Code != http.StatusForbidden || !strings.Contains(second.Body.String(), "quota exhausted") {
+		t.Fatalf("post-quota request status=%d body=%s", second.Code, second.Body.String())
+	}
+	gateway.quota.flush()
+	var persistedQuota int64
+	if err := gateway.telemetry.db.QueryRow(`SELECT quota_used_bytes FROM proxy_rules WHERE domain_suffix=?`,
+		gateway.cfg.DefaultUpstream.Hostname()).Scan(&persistedQuota); err != nil || persistedQuota != 4096 {
+		t.Fatalf("persisted quota=%d err=%v", persistedQuota, err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var targetBytes, clientBytes int64
+		_ = gateway.telemetry.db.QueryRow(`SELECT COALESCE(SUM(bytes_out),0) FROM traffic_minutes`).Scan(&targetBytes)
+		_ = gateway.telemetry.db.QueryRow(`SELECT COALESCE(SUM(bytes_out),0) FROM client_geo_hours`).Scan(&clientBytes)
+		if targetBytes == 4096 && clientBytes == targetBytes {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("quota accounting diverged: target=%d client=%d", targetBytes, clientBytes)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

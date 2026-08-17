@@ -527,12 +527,25 @@ tbody tr:hover { background: color-mix(in srgb, var(--panel-alt) 56%, transparen
 .policy-mode span { min-height: 32px; padding: 0 11px; display: grid; place-items: center; border-radius: 4px; color: var(--muted); font-size: 11px; font-weight: 600; white-space: nowrap; }
 .policy-mode input:checked + span { background: var(--panel); color: var(--accent); box-shadow: var(--shadow-xs); }
 .policy-mode input:focus-visible + span { outline: 2px solid color-mix(in srgb, var(--accent) 48%, transparent); outline-offset: 1px; }
-.rule-form { padding: 15px 16px 4px; display: grid; grid-template-columns: minmax(220px, 1fr) auto; align-items: end; gap: 12px; }
+.rule-form { padding: 15px 16px 4px; display: grid; grid-template-columns: minmax(220px, 1fr) minmax(180px, .55fr) auto; align-items: end; gap: 12px; }
 .rule-form label { margin-top: 0; }
 .rule-add { margin: 0; }
 .inline-error { margin: 8px 16px 15px; }
-.rules-table-section td:last-child, .rules-table-section th:last-child { width: 56px; padding-inline: 8px; text-align: center; }
+.rules-table-section td:last-child, .rules-table-section th:last-child { width: 96px; padding-inline: 8px; text-align: center; }
 .rule-domain { font-weight: 600; }
+.rule-actions { display: flex; align-items: center; justify-content: center; gap: 2px; }
+.quota-cell { min-width: 190px; }
+.quota-summary { min-width: 170px; display: grid; gap: 5px; color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.quota-summary > span { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.quota-summary strong { color: var(--text); font-size: 11px; }
+.quota-summary.reached strong, .quota-summary.reached small { color: var(--red); }
+.quota-progress, .quota-usage progress { width: 100%; height: 5px; overflow: hidden; border: 0; border-radius: 999px; background: var(--panel-alt); }
+.quota-progress::-webkit-progress-bar, .quota-usage progress::-webkit-progress-bar { border-radius: 999px; background: var(--panel-alt); }
+.quota-progress::-webkit-progress-value, .quota-usage progress::-webkit-progress-value { border-radius: 999px; background: var(--accent); }
+.quota-progress::-moz-progress-bar, .quota-usage progress::-moz-progress-bar { border-radius: 999px; background: var(--accent); }
+.quota-summary.reached .quota-progress::-webkit-progress-value, .quota-usage.reached progress::-webkit-progress-value { background: var(--red); }
+.quota-summary.reached .quota-progress::-moz-progress-bar, .quota-usage.reached progress::-moz-progress-bar { background: var(--red); }
+.unlimited-label { color: var(--muted); font-size: 11px; }
 .danger-icon:hover { color: var(--red); background: var(--red-soft); }
 
 /* Connections, reports, audit and backups */
@@ -644,6 +657,19 @@ tbody tr:hover { background: color-mix(in srgb, var(--panel-alt) 56%, transparen
 .confirm-actions .primary-button, .confirm-actions .secondary-button { width: auto; min-width: 88px; margin: 0; }
 .confirm-actions .primary-button.danger { border-color: var(--red); background: var(--red); color: #fff; }
 .confirm-actions .primary-button.danger:hover { border-color: color-mix(in srgb, var(--red) 86%, #000); background: color-mix(in srgb, var(--red) 86%, #000); }
+.quota-dialog { width: min(500px, calc(100vw - 28px)); margin: auto; padding: 0; overflow: hidden; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--panel); color: var(--text); box-shadow: var(--shadow); }
+.quota-dialog::backdrop { background: rgba(9, 9, 11, 0.52); backdrop-filter: blur(2px); }
+.quota-dialog-header { min-height: 70px; padding: 14px 14px 14px 18px; display: grid; grid-template-columns: 38px minmax(0, 1fr) 36px; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); }
+.quota-dialog-header h2 { margin: 0; font-size: 15px; line-height: 1.35; }
+.quota-dialog-header p { margin: 3px 0 0; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.quota-dialog-body { padding: 20px; }
+.quota-unlimited-control { min-height: 36px; margin-bottom: 14px; }
+.quota-dialog-body label { margin-top: 0; }
+.quota-usage { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+.quota-usage > div { margin-bottom: 8px; display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.quota-usage progress { display: block; height: 7px; }
+.quota-dialog-actions { min-height: 62px; padding: 12px 14px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--border); background: var(--panel-subtle); }
+.quota-dialog-actions .primary-button, .quota-dialog-actions .secondary-button { width: auto; min-width: 118px; margin: 0; }
 .toast { position: fixed; top: 18px; right: 18px; z-index: 80; max-width: min(360px, calc(100vw - 36px)); padding: 10px 13px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--text); color: var(--panel); box-shadow: var(--shadow); font-size: 12px; }
 
 @media (max-width: 1220px) {
@@ -752,6 +778,7 @@ tbody tr:hover { background: color-mix(in srgb, var(--panel-alt) 56%, transparen
   .overview-columns, .chart-section, .policy-control { margin-top: 14px; }
   .overview-columns { gap: 14px; }
   .rule-form { grid-template-columns: 1fr; }
+  .rules-table-section .icon-button { width: 44px; min-width: 44px; height: 44px; flex: 0 0 44px; }
   .policy-schedule-form { grid-template-columns: 1fr; }
   .rule-add { width: 100%; }
   .policy-mode span { min-height: 44px; padding-inline: 8px; }
@@ -777,6 +804,11 @@ tbody tr:hover { background: color-mix(in srgb, var(--panel-alt) 56%, transparen
   .confirm-content { padding: 19px 17px; }
   .confirm-actions { padding: 12px; }
   .confirm-actions .primary-button, .confirm-actions .secondary-button { min-width: 0; min-height: 44px; flex: 1; }
+  .quota-dialog-header { padding-left: 14px; grid-template-columns: 38px minmax(0, 1fr) 44px; }
+  .quota-dialog-header .icon-button { width: 44px; height: 44px; }
+  .quota-dialog-body { padding: 18px 16px; }
+  .quota-dialog-actions { padding: 12px; }
+  .quota-dialog-actions .primary-button, .quota-dialog-actions .secondary-button { min-width: 0; min-height: 44px; flex: 1; }
   .toast { top: 10px; right: 10px; max-width: calc(100vw - 20px); }
   .login-shell { padding: 12px; }
   .login-frame { padding: 24px 20px; box-shadow: none; }

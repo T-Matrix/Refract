@@ -153,6 +153,7 @@ type meteredConn struct {
 	flow      *connectionFlow
 	clientIP  string
 	bandwidth *bandwidthLimiter
+	quota     *domainQuotaAccount
 	context   context.Context
 }
 
@@ -164,9 +165,28 @@ func (c *meteredConn) Read(buffer []byte) (int, error) {
 }
 
 func (c *meteredConn) Write(buffer []byte) (int, error) {
-	written, err := writeWithBandwidthLimit(c.context, c.bandwidth, c.clientIP, buffer, c.Conn.Write)
+	written, err := writeMeteredPayload(c.context, c.bandwidth, c.quota, c.clientIP, buffer, c.Conn.Write)
 	c.meter.AddDownload(int64(written))
 	c.meter.AddClientDownload(c.clientIP, int64(written))
 	c.flow.AddDownload(int64(written))
+	return written, err
+}
+
+func writeMeteredPayload(ctx context.Context, bandwidth *bandwidthLimiter, quota *domainQuotaAccount, clientIP string, data []byte, write func([]byte) (int, error)) (int, error) {
+	allowed := len(data)
+	limited := false
+	if quota != nil {
+		allowed, limited = quota.Reserve(len(data))
+		if allowed == 0 && limited {
+			return 0, errDomainQuotaExceeded
+		}
+	}
+	written, err := writeWithBandwidthLimit(ctx, bandwidth, clientIP, data[:allowed], write)
+	if quota != nil && written < allowed {
+		quota.Release(allowed - written)
+	}
+	if err == nil && limited {
+		err = errDomainQuotaExceeded
+	}
 	return written, err
 }
