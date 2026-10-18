@@ -2,6 +2,25 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的结构，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.16.0] - 2026-10-18
+
+### 新增
+
+- 管理员可以维护 Emby 服务器分组、线路和备注，并查看在线状态、SLA 与延迟。
+- 支持按播放器名称禁用播放器，阻止不符合策略的播放请求。
+- 支持设备黑名单、白名单，并在最近请求中识别设备信息。
+- 最近请求支持将设备一键加入黑名单或白名单。
+
+### 修复
+
+- 健康检查会根据真实 HTTP 响应判断服务状态，包含 4xx/5xx 响应时也能记录可用的响应信息。
+- 旧数据库自动迁移并保留已有配置、请求日志和设备策略。
+
+### 安全
+
+- 黑白名单策略在代理请求进入和设备识别后统一执行，避免通过不同请求路径绕过策略。
+- 播放器禁用规则与设备策略均持久化到 SQLite，并随备份保留。
+
 ## [1.15.0] - 2026-08-17
 
 ### 新增
@@ -150,3 +169,4 @@
 [1.13.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.13.0
 [1.14.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.14.0
 [1.15.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.15.0
+[1.16.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.16.0
