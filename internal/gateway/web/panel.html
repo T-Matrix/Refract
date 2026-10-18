@@ -6,11 +6,11 @@
   <meta name="robots" content="noindex,nofollow">
   <title>Refract</title>
   <link rel="icon" href="/_gateway/avatar">
-  <link rel="stylesheet" href="/_admin/assets/app.css?v=1.15.0-20260817-2">
+  <link rel="stylesheet" href="/_admin/assets/app.css?v=1.15.0-20261017-device-rules-1">
   <script defer src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"></script>
   <script defer src="/_admin/assets/lucide.min.js"></script>
   <script defer src="/_admin/assets/echarts.min.js"></script>
-  <script defer src="/_admin/assets/panel.js?v=1.15.0-20260817-2"></script>
+  <script defer src="/_admin/assets/panel.js?v=1.15.0-20261017-device-rules-1"></script>
 </head>
 <body class="panel-page">
   <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -28,6 +28,7 @@
           <button class="nav-button active" type="button" data-view="overview" title="概览"><i data-lucide="layout-dashboard"></i><span>概览</span></button>
           <button class="nav-button" type="button" data-view="connections" title="实时连接"><i data-lucide="radio-tower"></i><span>实时连接</span></button>
           <button class="nav-button" type="button" data-view="targets" title="后端"><i data-lucide="server"></i><span>后端</span></button>
+          <button class="nav-button" type="button" data-view="emby-health" title="Emby 健康"><i data-lucide="heart-pulse"></i><span>Emby 健康</span></button>
           <button class="nav-button" type="button" data-view="requests" title="请求"><i data-lucide="scroll-text"></i><span>请求</span></button>
         </div>
         <div class="nav-group">
@@ -222,6 +223,35 @@
           </section>
         </section>
 
+        <section id="view-emby-health" class="view" aria-labelledby="page-title">
+          <section class="data-section emby-health-config">
+            <div class="section-heading"><div><h2 id="emby-health-form-title">添加监测服务器</h2><p>按命名分组管理 Emby 服务；探测地址不会公开展示</p></div><span id="emby-health-count" class="quiet-label">0 台服务器</span></div>
+            <form id="emby-health-form" class="emby-health-form">
+              <div><label for="emby-health-group">分组名称</label><input id="emby-health-group" type="text" maxlength="128" autocomplete="off" required placeholder="例如：华东线路"></div>
+              <div><label for="emby-health-name">服务器名称</label><input id="emby-health-name" type="text" maxlength="128" autocomplete="off" required placeholder="例如：主力节点"></div>
+              <div><label for="emby-health-line">线路</label><input id="emby-health-line" type="text" maxlength="128" autocomplete="off" placeholder="例如：电信 / 主线路"></div>
+              <div class="emby-health-url-field"><label for="emby-health-url">服务器地址</label><input id="emby-health-url" type="url" maxlength="2048" autocomplete="url" required placeholder="https://media.example.com:8920"></div>
+              <div class="emby-health-note-field"><label for="emby-health-note">备注</label><input id="emby-health-note" type="text" maxlength="512" autocomplete="off" placeholder="例如：晚高峰观察节点"></div>
+              <label class="toggle-control emby-health-enabled"><input id="emby-health-enabled" type="checkbox" checked><span aria-hidden="true"></span><b>启用监测</b></label>
+              <p id="emby-health-error" class="form-error" role="alert" hidden></p>
+              <div class="form-actions emby-health-actions">
+                <button id="emby-health-submit" class="primary-button compact" type="submit"><i data-lucide="plus"></i><span>添加服务器</span></button>
+                <button id="emby-health-cancel-edit" class="secondary-button compact-button" type="button" hidden><i data-lucide="x"></i><span>取消编辑</span></button>
+              </div>
+            </form>
+          </section>
+          <section class="data-section table-section emby-health-table-section">
+            <div class="section-heading"><div><h2>监测服务器</h2><p>每分钟检测一次 Emby 公共系统信息接口</p></div><span id="emby-health-updated" class="quiet-label">等待加载</span></div>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>服务器</th><th>状态</th><th>延迟</th><th>24 小时</th><th>7 天</th><th>30 天</th><th>最近检测</th><th aria-label="操作"></th></tr></thead>
+                <tbody id="emby-health-table"></tbody>
+              </table>
+            </div>
+            <p id="emby-health-empty" class="empty-state">尚未添加监测服务器</p>
+          </section>
+        </section>
+
         <section id="view-requests" class="view" aria-labelledby="page-title">
           <section class="data-section table-section">
             <div class="section-heading"><div><h2>请求日志</h2><p>按时间倒序，记录保留 7 天</p></div><div class="request-log-heading-meta"><span id="request-total-label" class="quiet-label">共 0 条</span><span id="dropped-label" class="quiet-label">无丢弃</span></div></div>
@@ -264,6 +294,48 @@
               <button id="rule-add" class="primary-button compact rule-add" type="submit"><i data-lucide="plus"></i><span>选择模式后添加</span></button>
             </form>
             <p id="rule-error" class="form-error inline-error" role="alert" hidden></p>
+          </section>
+          <section class="data-section device-policy-section">
+            <div class="section-heading">
+              <div><h2>播放器设备策略</h2><p id="device-policy-summary">关闭 · 全部设备放行</p></div>
+              <fieldset id="device-policy-mode" class="policy-mode">
+                <legend class="sr-only">选择设备访问模式</legend>
+                <label><input type="radio" name="device-policy-mode" value="off"><span>关闭</span></label>
+                <label><input type="radio" name="device-policy-mode" value="blacklist"><span>黑名单</span></label>
+                <label><input type="radio" name="device-policy-mode" value="whitelist"><span>白名单</span></label>
+              </fieldset>
+            </div>
+            <form id="device-rule-form" class="device-rule-form">
+              <div><label for="device-id">设备 ID</label><input id="device-id" type="text" maxlength="256" autocomplete="off" required></div>
+              <div><label for="device-name">设备名称</label><input id="device-name" type="text" maxlength="128" autocomplete="off" placeholder="可选"></div>
+              <div><label for="device-client">客户端名称</label><input id="device-client" type="text" maxlength="128" autocomplete="off" placeholder="可选"></div>
+              <button id="device-rule-add" class="primary-button compact" type="submit"><i data-lucide="plus"></i><span>选择模式后添加</span></button>
+            </form>
+            <p id="device-rule-error" class="form-error inline-error" role="alert" hidden></p>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>设备</th><th>客户端</th><th>设备 ID</th><th>创建时间</th><th aria-label="操作"></th></tr></thead>
+                <tbody id="device-rules-table"></tbody>
+              </table>
+            </div>
+            <p id="device-rules-empty" class="empty-state">选择黑名单或白名单模式后管理设备</p>
+            <div class="device-player-heading section-heading">
+              <div><h3>禁用播放器</h3><p>按 Emby 客户端名称匹配，独立于设备黑白名单</p></div>
+              <span id="player-rule-count" class="quiet-label">0 个播放器</span>
+            </div>
+            <form id="player-rule-form" class="player-rule-form">
+              <div><label for="player-name">播放器名称</label><input id="player-name" type="text" maxlength="128" autocomplete="off" required placeholder="例如：Infuse"></div>
+              <div><label for="player-note">备注</label><input id="player-note" type="text" maxlength="512" autocomplete="off" placeholder="例如：临时禁用旧版客户端"></div>
+              <button id="player-rule-add" class="primary-button compact" type="submit"><i data-lucide="ban"></i><span>禁用播放器</span></button>
+            </form>
+            <p id="player-rule-error" class="form-error inline-error" role="alert" hidden></p>
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>播放器</th><th>备注</th><th>创建时间</th><th aria-label="操作"></th></tr></thead>
+                <tbody id="player-rules-table"></tbody>
+              </table>
+            </div>
+            <p id="player-rules-empty" class="empty-state">暂无禁用播放器</p>
           </section>
           <section class="data-section policy-schedule-section">
             <div class="section-heading">
@@ -469,6 +541,7 @@
       <button type="button" data-command-view="overview" data-command-search="概览 仪表盘 流量 地图"><i data-lucide="layout-dashboard"></i><span><strong>运行概览</strong><small>流量、地图和实时状态</small></span></button>
       <button type="button" data-command-view="connections" data-command-search="实时 连接 客户端 速度"><i data-lucide="radio-tower"></i><span><strong>实时连接</strong><small>当前传输与连接控制</small></span></button>
       <button type="button" data-command-view="targets" data-command-search="后端 域名 目标"><i data-lucide="server"></i><span><strong>后端域名</strong><small>自动发现的公网目标</small></span></button>
+      <button type="button" data-command-view="emby-health" data-command-search="Emby 服务器 健康 检测 延迟 在线 SLA 可用率 分组"><i data-lucide="heart-pulse"></i><span><strong>Emby 健康</strong><small>服务器分组、在线状态与监测可用率</small></span></button>
       <button type="button" data-command-view="requests" data-command-search="请求 日志 访问"><i data-lucide="scroll-text"></i><span><strong>请求日志</strong><small>最近的脱敏请求</small></span></button>
       <button type="button" data-command-view="reports" data-command-search="统计 报表 图表 CSV 地域"><i data-lucide="chart-no-axes-combined"></i><span><strong>统计报表</strong><small>趋势、排行与数据导出</small></span></button>
       <button type="button" data-command-view="rules" data-command-search="安全 规则 黑名单 白名单"><i data-lucide="shield-check"></i><span><strong>访问规则</strong><small>域名黑白名单策略</small></span></button>

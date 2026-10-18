@@ -27,6 +27,9 @@ type telemetryEvent struct {
 	FlowID     string
 	Timestamp  time.Time
 	ClientIP   string
+	DeviceID   string
+	DeviceName string
+	ClientName string
 	Host       string
 	Scheme     string
 	Method     string
@@ -43,6 +46,9 @@ type requestLog struct {
 	Timestamp  int64  `json:"timestamp"`
 	Host       string `json:"host"`
 	Scheme     string `json:"scheme"`
+	DeviceID   string `json:"device_id"`
+	DeviceName string `json:"device_name"`
+	ClientName string `json:"client_name"`
 	Method     string `json:"method"`
 	Path       string `json:"path"`
 	Category   string `json:"category"`
@@ -140,7 +146,10 @@ func openTelemetryStore(path, username, passwordHash string) (*telemetryStore, e
 			status INTEGER NOT NULL,
 			bytes_in INTEGER NOT NULL,
 			bytes_out INTEGER NOT NULL,
-			duration_ms INTEGER NOT NULL
+			duration_ms INTEGER NOT NULL,
+			device_id TEXT NOT NULL DEFAULT '',
+			device_name TEXT NOT NULL DEFAULT '',
+			client_name TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_request_logs_timestamp ON request_logs(timestamp DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_request_logs_host_timestamp ON request_logs(host, timestamp DESC)`,
@@ -169,6 +178,41 @@ func openTelemetryStore(path, username, passwordHash string) (*telemetryStore, e
 			quota_used_bytes INTEGER NOT NULL DEFAULT 0 CHECK(quota_used_bytes >= 0),
 			created_at INTEGER NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS proxy_device_rules (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			device_id TEXT NOT NULL UNIQUE,
+			device_name TEXT NOT NULL DEFAULT '',
+			client_name TEXT NOT NULL DEFAULT '',
+			enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS proxy_player_rules (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			player_name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+			note TEXT NOT NULL DEFAULT '',
+			enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS monitored_emby_servers (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			group_name TEXT NOT NULL,
+			name TEXT NOT NULL,
+			base_url TEXT NOT NULL,
+			enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+			config_version INTEGER NOT NULL DEFAULT 1,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_monitored_emby_servers_group ON monitored_emby_servers(group_name COLLATE NOCASE,name COLLATE NOCASE,id)`,
+		`CREATE TABLE IF NOT EXISTS emby_health_checks (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			server_id INTEGER NOT NULL REFERENCES monitored_emby_servers(id) ON DELETE CASCADE,
+			checked_at INTEGER NOT NULL,
+			success INTEGER NOT NULL CHECK(success IN (0,1)),
+			latency_ms INTEGER NOT NULL CHECK(latency_ms >= 0),
+			status_code INTEGER NOT NULL DEFAULT 0 CHECK(status_code BETWEEN 0 AND 599)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_emby_health_checks_server_time ON emby_health_checks(server_id,checked_at DESC,id DESC)`,
 		`CREATE TABLE IF NOT EXISTS telegram_settings (
 			id INTEGER PRIMARY KEY CHECK(id = 1),
 			enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),
@@ -235,12 +279,23 @@ func openTelemetryStore(path, username, passwordHash string) (*telemetryStore, e
 		}
 	}
 	for column, definition := range map[string]string{
+		"device_id":        "TEXT NOT NULL DEFAULT ''",
+		"device_name":      "TEXT NOT NULL DEFAULT ''",
+		"client_name":      "TEXT NOT NULL DEFAULT ''",
 		"quota_bytes":      "INTEGER NOT NULL DEFAULT 0 CHECK(quota_bytes >= 0)",
 		"quota_used_bytes": "INTEGER NOT NULL DEFAULT 0 CHECK(quota_used_bytes >= 0)",
+		"line_name":        "TEXT NOT NULL DEFAULT ''",
+		"note":             "TEXT NOT NULL DEFAULT ''",
 	} {
-		if err := ensureSQLiteColumn(db, "proxy_rules", column, definition); err != nil {
+		table := "proxy_rules"
+		if column == "line_name" || column == "note" {
+			table = "monitored_emby_servers"
+		} else if column == "device_id" || column == "device_name" || column == "client_name" {
+			table = "request_logs"
+		}
+		if err := ensureSQLiteColumn(db, table, column, definition); err != nil {
 			_ = db.Close()
-			return nil, fmt.Errorf("migrate proxy rule quota: %w", err)
+			return nil, fmt.Errorf("migrate telemetry schema: %w", err)
 		}
 	}
 	if path != ":memory:" && !strings.HasPrefix(path, "file:") {
@@ -349,6 +404,9 @@ func (s *telemetryStore) RecordCompleted(event telemetryEvent, connections *conn
 func (s *telemetryStore) prepareEvent(event telemetryEvent) (telemetryEvent, bool) {
 	event.Host = strings.TrimSpace(event.Host)
 	event.ClientIP = normalizeTelemetryClientIP(event.ClientIP)
+	event.DeviceID = truncateRunes(strings.TrimSpace(event.DeviceID), 256)
+	event.DeviceName = truncateRunes(strings.TrimSpace(event.DeviceName), 128)
+	event.ClientName = truncateRunes(strings.TrimSpace(event.ClientName), 128)
 	event.Path, _, _ = strings.Cut(event.Path, "?")
 	event.Path, _, _ = strings.Cut(event.Path, "#")
 	if len(event.Host) > 255 || event.Host == "" || len(event.Method) > 16 {
@@ -431,10 +489,10 @@ func (s *telemetryStore) writeBatch(events []telemetryEvent) error {
 	defer tx.Rollback()
 	for _, event := range events {
 		if _, err := tx.Exec(
-			`INSERT INTO request_logs(timestamp,host,scheme,method,path,category,status,bytes_in,bytes_out,duration_ms)
-			 VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			`INSERT INTO request_logs(timestamp,host,scheme,method,path,category,status,bytes_in,bytes_out,duration_ms,device_id,device_name,client_name)
+			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			event.Timestamp.Unix(), event.Host, event.Scheme, event.Method, event.Path, event.Category,
-			event.Status, event.BytesIn, event.BytesOut, event.DurationMS,
+			event.Status, event.BytesIn, event.BytesOut, event.DurationMS, event.DeviceID, event.DeviceName, event.ClientName,
 		); err != nil {
 			return err
 		}
@@ -882,7 +940,7 @@ func (s *telemetryStore) recent(ctx context.Context, limit int, host string) ([]
 	if limit < 1 || limit > 200 {
 		limit = 50
 	}
-	query := `SELECT id,timestamp,host,scheme,method,path,category,status,bytes_in,bytes_out,duration_ms FROM request_logs`
+	query := `SELECT id,timestamp,host,scheme,device_id,device_name,client_name,method,path,category,status,bytes_in,bytes_out,duration_ms FROM request_logs`
 	args := make([]any, 0, 2)
 	if host = strings.TrimSpace(host); host != "" {
 		query += ` WHERE host=?`
@@ -898,7 +956,7 @@ func (s *telemetryStore) recent(ctx context.Context, limit int, host string) ([]
 	result := make([]requestLog, 0, limit)
 	for rows.Next() {
 		var item requestLog
-		if err := rows.Scan(&item.ID, &item.Timestamp, &item.Host, &item.Scheme, &item.Method, &item.Path, &item.Category,
+		if err := rows.Scan(&item.ID, &item.Timestamp, &item.Host, &item.Scheme, &item.DeviceID, &item.DeviceName, &item.ClientName, &item.Method, &item.Path, &item.Category,
 			&item.Status, &item.BytesIn, &item.BytesOut, &item.DurationMS); err != nil {
 			return nil, err
 		}
@@ -966,7 +1024,7 @@ func (s *telemetryStore) requestLogPage(ctx context.Context, page, pageSize int,
 	page = min(page, totalPages)
 	offset := (page - 1) * pageSize
 
-	query := `SELECT id,timestamp,host,scheme,method,path,category,status,bytes_in,bytes_out,duration_ms FROM request_logs` +
+	query := `SELECT id,timestamp,host,scheme,device_id,device_name,client_name,method,path,category,status,bytes_in,bytes_out,duration_ms FROM request_logs` +
 		where + ` ORDER BY id DESC LIMIT ? OFFSET ?`
 	queryArgs := append(append([]any(nil), args...), pageSize, offset)
 	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
@@ -977,7 +1035,7 @@ func (s *telemetryStore) requestLogPage(ctx context.Context, page, pageSize int,
 	logs := make([]requestLog, 0, pageSize)
 	for rows.Next() {
 		var item requestLog
-		if err := rows.Scan(&item.ID, &item.Timestamp, &item.Host, &item.Scheme, &item.Method, &item.Path, &item.Category,
+		if err := rows.Scan(&item.ID, &item.Timestamp, &item.Host, &item.Scheme, &item.DeviceID, &item.DeviceName, &item.ClientName, &item.Method, &item.Path, &item.Category,
 			&item.Status, &item.BytesIn, &item.BytesOut, &item.DurationMS); err != nil {
 			return requestLogPage{}, err
 		}

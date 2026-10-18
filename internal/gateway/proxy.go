@@ -26,6 +26,7 @@ type Gateway struct {
 	proxy       *httputil.ReverseProxy
 	transport   *http.Transport
 	telemetry   *telemetryStore
+	embyHealth  *embyHealthMonitor
 	admin       *adminServer
 	telegram    *telegramReporter
 	turnstile   *turnstileManager
@@ -177,6 +178,7 @@ func NewChecked(cfg Config) (*Gateway, error) {
 			return nil, fmt.Errorf("initialize admin panel: %w", err)
 		}
 		gateway.admin = admin
+		gateway.embyHealth = newEmbyHealthMonitor(store, gateway.resolver)
 		gateway.geo = newGeoTracker(store, cfg)
 		gateway.meter.SetClientPeakSink(gateway.geo.ObservePeak)
 		gateway.quota = newDomainQuotaManager(store)
@@ -186,6 +188,9 @@ func NewChecked(cfg Config) (*Gateway, error) {
 }
 
 func (g *Gateway) Close() {
+	if g.embyHealth != nil {
+		g.embyHealth.Close()
+	}
 	if g.telegram != nil {
 		g.telegram.Close()
 	}
@@ -220,6 +225,25 @@ func (g *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	if g.admin != nil && g.admin.Handle(writer, request) {
+		return
+	}
+	if request.URL.Path == "/_gateway/emby-health" {
+		if request.Method != http.MethodGet {
+			writer.Header().Set("Allow", http.MethodGet)
+			writeGatewayError(writer, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		writer.Header().Set("Cache-Control", "no-store")
+		servers := make([]embyHealthServer, 0)
+		if g.telemetry != nil {
+			var err error
+			servers, err = g.telemetry.EmbyHealthServers(request.Context(), false)
+			if err != nil {
+				writeGatewayError(writer, http.StatusInternalServerError, "health status unavailable")
+				return
+			}
+		}
+		writeJSON(writer, http.StatusOK, embyHealthPublicSnapshot(servers))
 		return
 	}
 	if request.URL.Path == "/_gateway/health" {
@@ -260,12 +284,26 @@ func (g *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	client := adminClientIP(request, g.cfg.TrustProxyHeaders)
 	policy := g.policy.Load()
 	policyCheckedAt := time.Now()
+	device := requestDeviceIdentity(request)
+	if !policy.DevicePolicy.AllowsIdentity(device.ID, device.ClientName) {
+		g.blocked.Add(1)
+		if g.telemetry != nil {
+			g.telemetry.Record(telemetryEvent{
+				Timestamp: time.Now(), ClientIP: client, Host: target.Host, Scheme: target.Scheme, Method: request.Method,
+				DeviceID: device.ID, DeviceName: device.DeviceName, ClientName: device.ClientName,
+				Path: target.EscapedPath(), Category: "device-policy", Status: http.StatusForbidden,
+			})
+		}
+		writeGatewayError(writer, http.StatusForbidden, "device is blocked by proxy device policy")
+		return
+	}
 	allowed, quotaRule := policy.evaluateAt(target, policyCheckedAt)
 	if !allowed {
 		g.blocked.Add(1)
 		if g.telemetry != nil {
 			g.telemetry.Record(telemetryEvent{
 				Timestamp: time.Now(), ClientIP: client, Host: target.Host, Scheme: target.Scheme, Method: request.Method,
+				DeviceID: device.ID, DeviceName: device.DeviceName, ClientName: device.ClientName,
 				Path: target.EscapedPath(), Category: "policy", Status: http.StatusForbidden,
 			})
 		}
@@ -281,6 +319,7 @@ func (g *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		if g.telemetry != nil {
 			g.telemetry.Record(telemetryEvent{
 				Timestamp: time.Now(), ClientIP: client, Host: target.Host, Scheme: target.Scheme, Method: request.Method,
+				DeviceID: device.ID, DeviceName: device.DeviceName, ClientName: device.ClientName,
 				Path: target.EscapedPath(), Category: "quota", Status: http.StatusForbidden,
 			})
 		}
@@ -311,7 +350,8 @@ func (g *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if path == "" {
 		path = "/"
 	}
-	flow := g.connections.Start(cancelRequest, client, request.Method, target.Host, normalizeHost(target.Hostname()), path, resourceCategory(path), request.UserAgent())
+	flow := g.connections.StartForIdentity(cancelRequest, client, request.Method, target.Host, normalizeHost(target.Hostname()), path, resourceCategory(path), request.UserAgent(), device.ID, device.ClientName)
+	flow.deviceName = device.DeviceName
 	defer g.connections.Finish(flow)
 	request = request.WithContext(requestContext)
 
@@ -368,6 +408,9 @@ func (g *Gateway) finalizeProxyRequest(request *http.Request, target *url.URL, p
 			FlowID:     flow.id,
 			Timestamp:  time.Now(),
 			ClientIP:   client,
+			DeviceID:   flow.deviceID,
+			DeviceName: flow.deviceName,
+			ClientName: flow.clientName,
 			Host:       target.Host,
 			Scheme:     target.Scheme,
 			Method:     request.Method,

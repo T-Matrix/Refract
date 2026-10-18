@@ -32,23 +32,48 @@ type proxyRule struct {
 	quota               *domainQuotaAccount
 }
 
+type deviceRule struct {
+	ID         int64  `json:"id"`
+	DeviceID   string `json:"device_id"`
+	DeviceName string `json:"device_name"`
+	ClientName string `json:"client_name"`
+	Enabled    bool   `json:"enabled"`
+	CreatedAt  int64  `json:"created_at"`
+}
+
+type playerRule struct {
+	ID         int64  `json:"id"`
+	PlayerName string `json:"player_name"`
+	Note       string `json:"note"`
+	Enabled    bool   `json:"enabled"`
+	CreatedAt  int64  `json:"created_at"`
+}
+
+type devicePolicy struct {
+	Mode        string       `json:"mode"`
+	Rules       []deviceRule `json:"rules"`
+	PlayerRules []playerRule `json:"player_rules"`
+}
+
 type proxyPolicy struct {
-	Mode            string      `json:"mode"`
-	Rules           []proxyRule `json:"rules"`
-	ScheduleEnabled bool        `json:"schedule_enabled"`
-	ScheduleStart   string      `json:"schedule_start"`
-	ScheduleEnd     string      `json:"schedule_end"`
+	Mode            string       `json:"mode"`
+	Rules           []proxyRule  `json:"rules"`
+	DevicePolicy    devicePolicy `json:"device_policy"`
+	ScheduleEnabled bool         `json:"schedule_enabled"`
+	ScheduleStart   string       `json:"schedule_start"`
+	ScheduleEnd     string       `json:"schedule_end"`
 }
 
 type proxyPolicyJSON struct {
-	Mode                   string      `json:"mode"`
-	Rules                  []proxyRule `json:"rules"`
-	ScheduleEnabled        bool        `json:"schedule_enabled"`
-	ScheduleStart          string      `json:"schedule_start"`
-	ScheduleEnd            string      `json:"schedule_end"`
-	ScheduleOpen           bool        `json:"schedule_open"`
-	ScheduleTimezone       string      `json:"schedule_timezone"`
-	ScheduleNextTransition int64       `json:"schedule_next_transition"`
+	Mode                   string       `json:"mode"`
+	Rules                  []proxyRule  `json:"rules"`
+	DevicePolicy           devicePolicy `json:"device_policy"`
+	ScheduleEnabled        bool         `json:"schedule_enabled"`
+	ScheduleStart          string       `json:"schedule_start"`
+	ScheduleEnd            string       `json:"schedule_end"`
+	ScheduleOpen           bool         `json:"schedule_open"`
+	ScheduleTimezone       string       `json:"schedule_timezone"`
+	ScheduleNextTransition int64        `json:"schedule_next_transition"`
 }
 
 func (p *proxyPolicy) MarshalJSON() ([]byte, error) {
@@ -70,6 +95,7 @@ func (p *proxyPolicy) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(proxyPolicyJSON{
 		Mode: p.Mode, Rules: rules,
+		DevicePolicy:    p.DevicePolicy,
 		ScheduleEnabled: p.ScheduleEnabled, ScheduleStart: p.ScheduleStart, ScheduleEnd: p.ScheduleEnd,
 		ScheduleOpen: open, ScheduleTimezone: applicationTimezone, ScheduleNextTransition: nextUnix,
 	})
@@ -204,6 +230,58 @@ func (p *proxyPolicy) matchingRule(host, action string) *proxyRule {
 	return match
 }
 
+func (p *devicePolicy) Allows(deviceID string) bool {
+	return p.AllowsIdentity(deviceID, "")
+}
+
+func (p *devicePolicy) AllowsIdentity(deviceID, clientName string) bool {
+	if p == nil {
+		return true
+	}
+	if p.playerBlocked(clientName) {
+		return false
+	}
+	if p.Mode == proxyModeOff {
+		return true
+	}
+	matched := p.matchingRule(deviceID) != nil
+	switch p.Mode {
+	case proxyModeBlacklist:
+		return !matched
+	case proxyModeWhitelist:
+		return matched
+	default:
+		return true
+	}
+}
+
+func (p *devicePolicy) playerBlocked(clientName string) bool {
+	clientName = normalizePlayerNameValue(clientName)
+	if p == nil || clientName == "" {
+		return false
+	}
+	for index := range p.PlayerRules {
+		rule := &p.PlayerRules[index]
+		if rule.Enabled && strings.EqualFold(normalizePlayerNameValue(rule.PlayerName), clientName) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *devicePolicy) matchingRule(deviceID string) *deviceRule {
+	if p == nil || deviceID == "" {
+		return nil
+	}
+	for index := range p.Rules {
+		rule := &p.Rules[index]
+		if rule.Enabled && rule.DeviceID == deviceID {
+			return rule
+		}
+	}
+	return nil
+}
+
 func (r proxyRule) matchesHost(host string) bool {
 	if ruleIP := net.ParseIP(r.DomainSuffix); ruleIP != nil {
 		hostIP := net.ParseIP(host)
@@ -257,7 +335,11 @@ func validRuleDomain(value string) bool {
 }
 
 func (s *telemetryStore) LoadProxyPolicy(ctx context.Context) (*proxyPolicy, error) {
-	policy := &proxyPolicy{Mode: proxyModeOff, Rules: []proxyRule{}, ScheduleStart: "09:00", ScheduleEnd: "23:00"}
+	policy := &proxyPolicy{
+		Mode: proxyModeOff, Rules: []proxyRule{},
+		DevicePolicy:  devicePolicy{Mode: proxyModeOff, Rules: []deviceRule{}, PlayerRules: []playerRule{}},
+		ScheduleStart: "09:00", ScheduleEnd: "23:00",
+	}
 	var storedMode string
 	modeErr := s.db.QueryRowContext(ctx, `SELECT value FROM gateway_settings WHERE key='proxy_policy_mode'`).Scan(&storedMode)
 	if modeErr != nil && !errors.Is(modeErr, sql.ErrNoRows) {
@@ -307,6 +389,49 @@ func (s *telemetryStore) LoadProxyPolicy(ctx context.Context) (*proxyPolicy, err
 			policy.Mode = proxyModeBlacklist
 		}
 	}
+	var deviceMode string
+	if err := s.db.QueryRowContext(ctx, `SELECT value FROM gateway_settings WHERE key='proxy_device_policy_mode'`).Scan(&deviceMode); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	deviceRows, err := s.db.QueryContext(ctx,
+		`SELECT id,device_id,device_name,client_name,enabled,created_at FROM proxy_device_rules ORDER BY id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer deviceRows.Close()
+	for deviceRows.Next() {
+		var rule deviceRule
+		var enabledInt int
+		if err := deviceRows.Scan(&rule.ID, &rule.DeviceID, &rule.DeviceName, &rule.ClientName, &enabledInt, &rule.CreatedAt); err != nil {
+			return nil, err
+		}
+		rule.Enabled = enabledInt == 1
+		policy.DevicePolicy.Rules = append(policy.DevicePolicy.Rules, rule)
+	}
+	if err := deviceRows.Err(); err != nil {
+		return nil, err
+	}
+	if validProxyMode(deviceMode) {
+		policy.DevicePolicy.Mode = deviceMode
+	}
+	playerRows, err := s.db.QueryContext(ctx,
+		`SELECT id,player_name,note,enabled,created_at FROM proxy_player_rules ORDER BY id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer playerRows.Close()
+	for playerRows.Next() {
+		var rule playerRule
+		var enabledInt int
+		if err := playerRows.Scan(&rule.ID, &rule.PlayerName, &rule.Note, &enabledInt, &rule.CreatedAt); err != nil {
+			return nil, err
+		}
+		rule.Enabled = enabledInt == 1
+		policy.DevicePolicy.PlayerRules = append(policy.DevicePolicy.PlayerRules, rule)
+	}
+	if err := playerRows.Err(); err != nil {
+		return nil, err
+	}
 	var scheduleEnabled, scheduleStart, scheduleEnd string
 	for key, destination := range map[string]*string{
 		"proxy_schedule_enabled": &scheduleEnabled,
@@ -325,6 +450,125 @@ func (s *telemetryStore) LoadProxyPolicy(ctx context.Context) (*proxyPolicy, err
 		policy.ScheduleEnd = end
 	}
 	return policy, nil
+}
+
+func (s *telemetryStore) SetProxyDevicePolicyMode(ctx context.Context, mode string) error {
+	if !validProxyMode(mode) {
+		return errors.New("invalid device policy mode")
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO gateway_settings(key,value,updated_at) VALUES('proxy_device_policy_mode',?,?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, mode, time.Now().Unix())
+	return err
+}
+
+func normalizeDeviceRule(deviceID, deviceName, clientName string) (deviceRule, error) {
+	deviceID = strings.TrimSpace(deviceID)
+	deviceName = strings.TrimSpace(deviceName)
+	clientName = strings.TrimSpace(clientName)
+	if deviceID == "" || len(deviceID) > 256 || strings.IndexFunc(deviceID, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return deviceRule{}, errors.New("invalid device id")
+	}
+	if len(deviceName) > 128 || len(clientName) > 128 || strings.IndexFunc(deviceName+clientName, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return deviceRule{}, errors.New("device name or client name is too long")
+	}
+	return deviceRule{DeviceID: deviceID, DeviceName: deviceName, ClientName: clientName, Enabled: true}, nil
+}
+
+func normalizePlayerRule(playerName, note string) (playerRule, error) {
+	playerName = normalizePlayerNameValue(playerName)
+	note = strings.TrimSpace(note)
+	if playerName == "" || len(playerName) > 128 || hasControlCharacters(playerName) {
+		return playerRule{}, errors.New("invalid player name")
+	}
+	if len(note) > 512 || hasControlCharacters(note) {
+		return playerRule{}, errors.New("player note is too long")
+	}
+	return playerRule{PlayerName: playerName, Note: note, Enabled: true}, nil
+}
+
+func normalizePlayerNameValue(value string) string {
+	return strings.TrimSpace(value)
+}
+
+func (s *telemetryStore) UpsertProxyDeviceRule(ctx context.Context, rule deviceRule) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var existingID int64
+	err = tx.QueryRowContext(ctx, `SELECT id FROM proxy_device_rules WHERE device_id=? ORDER BY id DESC LIMIT 1`, rule.DeviceID).Scan(&existingID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	if existingID > 0 {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE proxy_device_rules SET device_name=?,client_name=?,enabled=1 WHERE id=?`,
+			rule.DeviceName, rule.ClientName, existingID); err != nil {
+			return 0, err
+		}
+		return existingID, tx.Commit()
+	}
+	result, err := tx.ExecContext(ctx,
+		`INSERT INTO proxy_device_rules(device_id,device_name,client_name,enabled,created_at) VALUES(?,?,?,1,?)`,
+		rule.DeviceID, rule.DeviceName, rule.ClientName, time.Now().Unix())
+	if err != nil {
+		return 0, err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
+}
+
+func (s *telemetryStore) DeleteProxyDeviceRule(ctx context.Context, id int64) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM proxy_device_rules WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return fmt.Errorf("device rule not found")
+	}
+	return nil
+}
+
+func (s *telemetryStore) UpsertProxyPlayerRule(ctx context.Context, rule playerRule) (int64, error) {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO proxy_player_rules(player_name,note,enabled,created_at) VALUES(?,?,1,?)
+		 ON CONFLICT(player_name) DO UPDATE SET note=excluded.note,enabled=1`,
+		rule.PlayerName, rule.Note, time.Now().Unix())
+	if err != nil {
+		return 0, err
+	}
+	if rule.ID > 0 {
+		return rule.ID, nil
+	}
+	var id int64
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM proxy_player_rules WHERE player_name=? COLLATE NOCASE`, rule.PlayerName).Scan(&id); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+func (s *telemetryStore) DeleteProxyPlayerRule(ctx context.Context, id int64) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM proxy_player_rules WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return fmt.Errorf("player rule not found")
+	}
+	return nil
 }
 
 func (s *telemetryStore) SetProxyPolicyMode(ctx context.Context, mode string) error {

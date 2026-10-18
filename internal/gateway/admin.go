@@ -1,10 +1,12 @@
 package gateway
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"embed"
 	"encoding/base64"
 	"encoding/json"
@@ -178,6 +180,34 @@ func (a *adminServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 		a.handleDomainRule(w, r)
 		return
 	}
+	if path == "/_admin/api/device-policy" {
+		a.handleDevicePolicy(w, r)
+		return
+	}
+	if path == "/_admin/api/emby-health" {
+		a.handleEmbyHealthServers(w, r)
+		return
+	}
+	if strings.HasPrefix(path, "/_admin/api/emby-health/") {
+		a.handleEmbyHealthServerItem(w, r)
+		return
+	}
+	if path == "/_admin/api/device-rules" {
+		a.handleDeviceRules(w, r)
+		return
+	}
+	if path == "/_admin/api/player-rules" {
+		a.handlePlayerRules(w, r)
+		return
+	}
+	if strings.HasPrefix(path, "/_admin/api/player-rules/") {
+		a.handlePlayerRuleDelete(w, r)
+		return
+	}
+	if strings.HasPrefix(path, "/_admin/api/device-rules/") {
+		a.handleDeviceRuleDelete(w, r)
+		return
+	}
 	if strings.HasPrefix(path, "/_admin/api/connections/") {
 		a.handleConnectionCancel(w, r)
 		return
@@ -342,6 +372,172 @@ func (a *adminServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *adminServer) handleEmbyHealthServers(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		servers, err := a.store.EmbyHealthServers(r.Context(), true)
+		if err != nil {
+			a.writeError(w, http.StatusInternalServerError, "health servers unavailable")
+			return
+		}
+		a.writeJSON(w, http.StatusOK, servers)
+	case http.MethodPost:
+		if !sameOriginRequest(r) {
+			a.writeError(w, http.StatusForbidden, "same-origin request required")
+			return
+		}
+		var payload struct {
+			GroupName string `json:"group_name"`
+			Name      string `json:"name"`
+			LineName  string `json:"line_name"`
+			Note      string `json:"note"`
+			BaseURL   string `json:"base_url"`
+			Enabled   bool   `json:"enabled"`
+		}
+		if err := decodeAdminJSON(w, r, &payload); err != nil {
+			a.writeError(w, http.StatusBadRequest, "invalid health server request")
+			return
+		}
+		server, err := normalizeEmbyHealthServerDetails(payload.GroupName, payload.Name, payload.LineName, payload.Note, payload.BaseURL, payload.Enabled)
+		if err != nil {
+			a.writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		id, err := a.store.SaveEmbyHealthServer(r.Context(), server)
+		if errors.Is(err, errEmbyHealthLimit) {
+			a.writeError(w, http.StatusConflict, "maximum monitored server count reached")
+			return
+		}
+		if err != nil {
+			a.writeError(w, http.StatusInternalServerError, "health server creation failed")
+			return
+		}
+		server.ID = id
+		a.auditRequest(r, "emby_health.server.create", strconv.FormatInt(id, 10), fmt.Sprintf("group=%q name=%q enabled=%t", server.GroupName, server.Name, server.Enabled), true)
+		if server.Enabled && a.gateway.embyHealth != nil {
+			a.gateway.embyHealth.Wake()
+		}
+		a.writeJSON(w, http.StatusCreated, server)
+	default:
+		a.methodNotAllowed(w, http.MethodGet+", "+http.MethodPost)
+	}
+}
+
+func (a *adminServer) handleEmbyHealthServerItem(w http.ResponseWriter, r *http.Request) {
+	remainder := strings.TrimPrefix(r.URL.Path, "/_admin/api/emby-health/")
+	parts := strings.Split(remainder, "/")
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || id < 1 {
+		a.writeError(w, http.StatusBadRequest, "invalid health server id")
+		return
+	}
+	if len(parts) == 2 && parts[1] == "check" {
+		if r.Method != http.MethodPost {
+			a.methodNotAllowed(w, http.MethodPost)
+			return
+		}
+		if !sameOriginRequest(r) {
+			a.writeError(w, http.StatusForbidden, "same-origin request required")
+			return
+		}
+		if a.gateway.embyHealth == nil {
+			a.writeError(w, http.StatusServiceUnavailable, "health monitor unavailable")
+			return
+		}
+		if err := a.gateway.embyHealth.CheckNow(r.Context(), id); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				a.writeError(w, http.StatusNotFound, "health server not found")
+			} else if errors.Is(err, errEmbyHealthDisabled) {
+				a.writeError(w, http.StatusConflict, "health server is disabled")
+			} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				a.writeError(w, http.StatusRequestTimeout, "health check timed out")
+			} else {
+				a.writeError(w, http.StatusInternalServerError, "health check failed")
+			}
+			return
+		}
+		servers, err := a.store.EmbyHealthServers(r.Context(), true)
+		if err != nil {
+			a.writeError(w, http.StatusInternalServerError, "health status unavailable")
+			return
+		}
+		for _, server := range servers {
+			if server.ID == id {
+				a.auditRequest(r, "emby_health.server.check", strconv.FormatInt(id, 10), "", true)
+				a.writeJSON(w, http.StatusOK, server)
+				return
+			}
+		}
+		a.writeError(w, http.StatusNotFound, "health server not found")
+		return
+	}
+	if len(parts) != 1 || parts[0] == "" {
+		a.writeError(w, http.StatusNotFound, "health server route not found")
+		return
+	}
+	switch r.Method {
+	case http.MethodPut:
+		if !sameOriginRequest(r) {
+			a.writeError(w, http.StatusForbidden, "same-origin request required")
+			return
+		}
+		var payload struct {
+			GroupName string `json:"group_name"`
+			Name      string `json:"name"`
+			LineName  string `json:"line_name"`
+			Note      string `json:"note"`
+			BaseURL   string `json:"base_url"`
+			Enabled   bool   `json:"enabled"`
+		}
+		if err := decodeAdminJSON(w, r, &payload); err != nil {
+			a.writeError(w, http.StatusBadRequest, "invalid health server request")
+			return
+		}
+		server, err := normalizeEmbyHealthServerDetails(payload.GroupName, payload.Name, payload.LineName, payload.Note, payload.BaseURL, payload.Enabled)
+		if err != nil {
+			a.writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		server.ID = id
+		if _, err := a.store.SaveEmbyHealthServer(r.Context(), server); errors.Is(err, sql.ErrNoRows) {
+			a.writeError(w, http.StatusNotFound, "health server not found")
+			return
+		} else if err != nil {
+			a.writeError(w, http.StatusInternalServerError, "health server update failed")
+			return
+		}
+		a.auditRequest(r, "emby_health.server.update", strconv.FormatInt(id, 10), fmt.Sprintf("group=%q name=%q enabled=%t", server.GroupName, server.Name, server.Enabled), true)
+		if server.Enabled && a.gateway.embyHealth != nil {
+			a.gateway.embyHealth.Wake()
+		}
+		servers, err := a.store.EmbyHealthServers(r.Context(), true)
+		if err != nil {
+			a.writeError(w, http.StatusInternalServerError, "health servers unavailable")
+			return
+		}
+		for _, saved := range servers {
+			if saved.ID == id {
+				a.writeJSON(w, http.StatusOK, saved)
+				return
+			}
+		}
+		a.writeError(w, http.StatusNotFound, "health server not found")
+	case http.MethodDelete:
+		if !sameOriginRequest(r) {
+			a.writeError(w, http.StatusForbidden, "same-origin request required")
+			return
+		}
+		if err := a.store.DeleteEmbyHealthServer(r.Context(), id); err != nil {
+			a.writeError(w, http.StatusNotFound, "health server not found")
+			return
+		}
+		a.auditRequest(r, "emby_health.server.delete", strconv.FormatInt(id, 10), "", true)
+		a.writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	default:
+		a.methodNotAllowed(w, http.MethodPut+", "+http.MethodDelete)
+	}
+}
+
 func parseGeographyPeriod(raw string) (time.Duration, bool) {
 	switch strings.TrimSpace(raw) {
 	case "", "24h":
@@ -432,6 +628,162 @@ func (a *adminServer) handlePolicySchedule(w http.ResponseWriter, r *http.Reques
 	detail := fmt.Sprintf("enabled=%t start=%s end=%s disconnected=%d", payload.Enabled, payload.Start, payload.End, disconnected)
 	a.auditRequest(r, "policy.schedule", "daily", detail, true)
 	a.writeJSON(w, http.StatusOK, a.gateway.policy.Load())
+}
+
+func (a *adminServer) handleDevicePolicy(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		a.writeJSON(w, http.StatusOK, a.gateway.policy.Load().DevicePolicy)
+	case http.MethodPut:
+		if !sameOriginRequest(r) {
+			a.writeError(w, http.StatusForbidden, "same-origin request required")
+			return
+		}
+		var payload struct {
+			Mode string `json:"mode"`
+		}
+		if err := decodeAdminJSON(w, r, &payload); err != nil || !validProxyMode(payload.Mode) {
+			a.writeError(w, http.StatusBadRequest, "invalid device policy mode")
+			return
+		}
+		if err := a.store.SetProxyDevicePolicyMode(r.Context(), payload.Mode); err != nil || a.gateway.reloadProxyPolicy(r.Context()) != nil {
+			a.writeError(w, http.StatusInternalServerError, "device policy update failed")
+			return
+		}
+		currentPolicy := a.gateway.policy.Load()
+		disconnected := a.gateway.connections.CancelDisallowedDevices(&currentPolicy.DevicePolicy)
+		a.auditRequest(r, "policy.device.mode", payload.Mode, fmt.Sprintf("disconnected=%d", disconnected), true)
+		a.writeJSON(w, http.StatusOK, a.gateway.policy.Load().DevicePolicy)
+	default:
+		a.methodNotAllowed(w, http.MethodGet+", "+http.MethodPut)
+	}
+}
+
+func (a *adminServer) handleDeviceRules(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		a.methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if !sameOriginRequest(r) {
+		a.writeError(w, http.StatusForbidden, "same-origin request required")
+		return
+	}
+	var payload struct {
+		DeviceID   string `json:"device_id"`
+		DeviceName string `json:"device_name"`
+		ClientName string `json:"client_name"`
+	}
+	if err := decodeAdminJSON(w, r, &payload); err != nil {
+		a.writeError(w, http.StatusBadRequest, "invalid device rule request")
+		return
+	}
+	if a.gateway.policy.Load().DevicePolicy.Mode == proxyModeOff {
+		a.writeError(w, http.StatusConflict, "select blacklist or whitelist mode first")
+		return
+	}
+	rule, err := normalizeDeviceRule(payload.DeviceID, payload.DeviceName, payload.ClientName)
+	if err != nil {
+		a.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := a.store.UpsertProxyDeviceRule(r.Context(), rule); err != nil || a.gateway.reloadProxyPolicy(r.Context()) != nil {
+		a.writeError(w, http.StatusInternalServerError, "device rule creation failed")
+		return
+	}
+	currentPolicy := a.gateway.policy.Load()
+	disconnected := a.gateway.connections.CancelDisallowedDevices(&currentPolicy.DevicePolicy)
+	a.auditRequest(r, "policy.device.rule.create", rule.DeviceID, fmt.Sprintf("device=%s client=%s disconnected=%d", rule.DeviceName, rule.ClientName, disconnected), true)
+	a.writeJSON(w, http.StatusCreated, a.gateway.policy.Load().DevicePolicy)
+}
+
+func (a *adminServer) handleDeviceRuleDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		a.methodNotAllowed(w, http.MethodDelete)
+		return
+	}
+	if !sameOriginRequest(r) {
+		a.writeError(w, http.StatusForbidden, "same-origin request required")
+		return
+	}
+	rawID := strings.TrimPrefix(r.URL.Path, "/_admin/api/device-rules/")
+	id, err := strconv.ParseInt(rawID, 10, 64)
+	if err != nil || id < 1 || strings.Contains(rawID, "/") {
+		a.writeError(w, http.StatusBadRequest, "invalid device rule id")
+		return
+	}
+	if err := a.store.DeleteProxyDeviceRule(r.Context(), id); err != nil {
+		a.writeError(w, http.StatusNotFound, "device rule not found")
+		return
+	}
+	if err := a.gateway.reloadProxyPolicy(r.Context()); err != nil {
+		a.writeError(w, http.StatusInternalServerError, "device rule update failed")
+		return
+	}
+	currentPolicy := a.gateway.policy.Load()
+	disconnected := a.gateway.connections.CancelDisallowedDevices(&currentPolicy.DevicePolicy)
+	a.auditRequest(r, "policy.device.rule.delete", rawID, fmt.Sprintf("disconnected=%d", disconnected), true)
+	a.writeJSON(w, http.StatusOK, a.gateway.policy.Load().DevicePolicy)
+}
+
+func (a *adminServer) handlePlayerRules(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		a.methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if !sameOriginRequest(r) {
+		a.writeError(w, http.StatusForbidden, "same-origin request required")
+		return
+	}
+	var payload struct {
+		PlayerName string `json:"player_name"`
+		Note       string `json:"note"`
+	}
+	if err := decodeAdminJSON(w, r, &payload); err != nil {
+		a.writeError(w, http.StatusBadRequest, "invalid player rule request")
+		return
+	}
+	rule, err := normalizePlayerRule(payload.PlayerName, payload.Note)
+	if err != nil {
+		a.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := a.store.UpsertProxyPlayerRule(r.Context(), rule); err != nil || a.gateway.reloadProxyPolicy(r.Context()) != nil {
+		a.writeError(w, http.StatusInternalServerError, "player rule creation failed")
+		return
+	}
+	currentPolicy := a.gateway.policy.Load()
+	disconnected := a.gateway.connections.CancelDisallowedDevices(&currentPolicy.DevicePolicy)
+	a.auditRequest(r, "policy.player.rule.create", rule.PlayerName, fmt.Sprintf("note=%s disconnected=%d", rule.Note, disconnected), true)
+	a.writeJSON(w, http.StatusCreated, a.gateway.policy.Load().DevicePolicy)
+}
+
+func (a *adminServer) handlePlayerRuleDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		a.methodNotAllowed(w, http.MethodDelete)
+		return
+	}
+	if !sameOriginRequest(r) {
+		a.writeError(w, http.StatusForbidden, "same-origin request required")
+		return
+	}
+	rawID := strings.TrimPrefix(r.URL.Path, "/_admin/api/player-rules/")
+	id, err := strconv.ParseInt(rawID, 10, 64)
+	if err != nil || id < 1 || strings.Contains(rawID, "/") {
+		a.writeError(w, http.StatusBadRequest, "invalid player rule id")
+		return
+	}
+	if err := a.store.DeleteProxyPlayerRule(r.Context(), id); err != nil {
+		a.writeError(w, http.StatusNotFound, "player rule not found")
+		return
+	}
+	if err := a.gateway.reloadProxyPolicy(r.Context()); err != nil {
+		a.writeError(w, http.StatusInternalServerError, "player rule update failed")
+		return
+	}
+	currentPolicy := a.gateway.policy.Load()
+	disconnected := a.gateway.connections.CancelDisallowedDevices(&currentPolicy.DevicePolicy)
+	a.auditRequest(r, "policy.player.rule.delete", rawID, fmt.Sprintf("disconnected=%d", disconnected), true)
+	a.writeJSON(w, http.StatusOK, a.gateway.policy.Load().DevicePolicy)
 }
 
 func (a *adminServer) handleRules(w http.ResponseWriter, r *http.Request) {

@@ -4,18 +4,20 @@
   const applicationTimeZone = 'Asia/Shanghai';
   const state = {
     snapshot: null, geography: null, overviewPeriod: '24h', geoChart: null, geoMapPromise: null,
+    geoView: { center: [0, 0], zoom: 1.08 }, geoChartEventsBound: false, geoWheelBound: false,
     view: 'overview', dashboardTimer: null, dashboardPromise: null, liveTimer: null, liveRefreshing: false, updateTimer: null,
     policy: null, policyTimer: null, telegram: null, turnstile: null, turnstileWidget: null, turnstileToken: '', runtimeConfig: null,
     report: null, reportPeriod: '24h', reportLiveChart: null, reportTrendChart: null, reportRegionChart: null,
     liveSeries: [], backups: null, update: null, currentRelease: null, branding: null, settingsSection: 'settings-security',
     requestPage: 1, requestPageSize: 20, requestStatus: '', requestTotalPages: 1, requestLoading: false,
-    quotaRule: null
+    quotaRule: null, embyHealthServers: [], embyHealthEditingID: null, embyHealthTimer: null
   };
   let confirmResolver = null;
   const viewMeta = {
     overview: ['运行概览', '通用反代实时状态', 'layout-dashboard'],
     connections: ['实时连接', '当前客户端与传输状态', 'radio-tower'],
     targets: ['后端域名', '自动发现的公网目标', 'server'],
+    'emby-health': ['Emby 健康', '服务器分组、在线状态与监测可用率', 'heart-pulse'],
     requests: ['请求日志', '脱敏后的最近请求', 'scroll-text'],
     reports: ['统计报表', '趋势、排行与数据导出', 'chart-no-axes-combined'],
     rules: ['访问规则', '按域名后缀控制访问', 'shield-check'],
@@ -408,6 +410,74 @@
     window.lucide?.createIcons();
   }
 
+  function requestDeviceLabel(log) {
+    const name = String(log.device_name || '').trim();
+    const client = String(log.client_name || '').trim();
+    const id = String(log.device_id || '').trim();
+    if (!name && !client && !id) return '';
+    const identity = name || id;
+    return client && client !== name ? `${identity} · ${client}` : identity;
+  }
+
+  function requestDeviceAction(log) {
+    const deviceID = String(log.device_id || '').trim();
+    if (!deviceID) return el('span', 'request-device-missing', '未识别设备');
+    const devicePolicy = state.policy?.device_policy || { mode: 'off', rules: [] };
+    const mode = devicePolicy.mode;
+    const modeLabel = mode === 'blacklist' ? '黑名单' : mode === 'whitelist' ? '白名单' : '';
+    if (mode === 'off') {
+      const button = el('button', 'device-action-button off');
+      button.type = 'button';
+      button.disabled = true;
+      button.title = '请先在访问规则中选择设备策略';
+      button.setAttribute('aria-label', button.title);
+      button.append(document.createElement('i'), el('span', '', '选择策略'));
+      button.firstElementChild.dataset.lucide = 'shield';
+      return button;
+    }
+    const existing = (devicePolicy.rules || []).find((rule) => rule.enabled !== false && rule.device_id === deviceID);
+    if (existing) {
+      const badge = el('span', 'request-device-added');
+      badge.append(el('i', '', ''), el('span', '', `已在${modeLabel || '设备名单'}`));
+      badge.firstElementChild.dataset.lucide = 'shield-check';
+      return badge;
+    }
+    const button = el('button', `device-action-button ${mode || 'off'}`);
+    button.type = 'button';
+    button.disabled = mode === 'off';
+    button.title = mode === 'off' ? '请先在访问规则中选择设备策略' : `加入${modeLabel}`;
+    button.setAttribute('aria-label', button.title);
+    const icon = document.createElement('i');
+    icon.dataset.lucide = mode === 'whitelist' ? 'shield-check' : 'shield-ban';
+    button.append(icon, el('span', '', mode === 'off' ? '选择策略' : `加入${modeLabel}`));
+    if (mode !== 'off') button.addEventListener('click', () => addDeviceRuleFromRequest(log, button));
+    return button;
+  }
+
+  async function addDeviceRuleFromRequest(log, button) {
+    const deviceID = String(log.device_id || '').trim();
+    const devicePolicy = state.policy?.device_policy || { mode: 'off', rules: [] };
+    if (!deviceID || !['blacklist', 'whitelist'].includes(devicePolicy.mode)) {
+      toast('请先选择设备黑名单或白名单模式');
+      return;
+    }
+    button.disabled = true;
+    try {
+      const updated = await api('/_admin/api/device-rules', jsonOptions('POST', {
+        device_id: deviceID,
+        device_name: String(log.device_name || '').trim(),
+        client_name: String(log.client_name || '').trim()
+      }));
+      state.policy.device_policy = updated;
+      renderDevicePolicy(updated);
+      if (state.snapshot) renderCompactRequests(state.snapshot.recent);
+      toast(updated.mode === 'blacklist' ? '设备已加入黑名单' : '设备已加入白名单');
+    } catch (failure) {
+      button.disabled = false;
+      toast(failure.message === 'select blacklist or whitelist mode first' ? '请先选择设备策略' : '设备规则保存失败');
+    }
+  }
+
   function renderCompactRequests(logs) {
     const container = document.getElementById('overview-requests');
     if (!logs?.length) return emptyList(container, '暂无请求记录');
@@ -416,10 +486,17 @@
       const row = el('div', 'compact-row');
       const copy = el('div');
       copy.append(el('strong', '', log.host), el('small', '', `${log.method} ${log.path}`));
-      row.append(copy, el('span', '', `${log.status} · ${log.duration_ms} ms`));
+      const deviceLabel = requestDeviceLabel(log);
+      const device = el('small', deviceLabel ? 'request-device' : 'request-device missing', deviceLabel ? `设备：${deviceLabel}` : '设备：未识别');
+      if (log.device_id) device.title = log.device_id;
+      copy.append(device);
+      const meta = el('div', 'request-actions');
+      meta.append(el('span', 'request-status', `${log.status} · ${log.duration_ms} ms`), requestDeviceAction(log));
+      row.append(copy, meta);
       fragment.append(row);
     });
     container.replaceChildren(fragment);
+    window.lucide?.createIcons();
   }
 
   function renderTargets(targets) {
@@ -439,6 +516,180 @@
       fragment.append(row);
     });
     body.replaceChildren(fragment);
+  }
+
+  function availabilityLabel(value) {
+    return value === null || value === undefined ? '—' : `${Number(value).toFixed(1)}%`;
+  }
+
+  function renderEmbyHealth(servers) {
+    state.embyHealthServers = Array.isArray(servers) ? servers : [];
+    const body = document.getElementById('emby-health-table');
+    const empty = document.getElementById('emby-health-empty');
+    const enabledCount = state.embyHealthServers.filter((server) => server.enabled).length;
+    document.getElementById('emby-health-count').textContent = `${formatNumber(state.embyHealthServers.length)} 台服务器 · ${formatNumber(enabledCount)} 台监测中`;
+    if (!state.embyHealthServers.length) {
+      body.replaceChildren();
+      empty.hidden = false;
+      document.getElementById('emby-health-updated').textContent = '尚无检测记录';
+      return;
+    }
+    empty.hidden = true;
+    const fragment = document.createDocumentFragment();
+    let group = null;
+    let latestCheck = 0;
+    state.embyHealthServers.forEach((server) => {
+      latestCheck = Math.max(latestCheck, Number(server.last_checked_at) || 0);
+      if (server.group_name !== group) {
+        group = server.group_name;
+        const groupRow = document.createElement('tr');
+        groupRow.className = 'health-group-row';
+        groupRow.append(el('th', '', group));
+        groupRow.firstElementChild.colSpan = 8;
+        fragment.append(groupRow);
+      }
+      const row = document.createElement('tr');
+      const identity = el('td', 'health-server-name');
+      identity.append(el('strong', '', server.name));
+      if (server.line_name) identity.append(el('small', 'health-server-line', server.line_name));
+      if (server.note) identity.append(el('small', 'health-server-note', server.note));
+      identity.append(el('small', 'health-server-url', server.base_url));
+      const statusLabels = { online: '在线', offline: '离线', unknown: '待检测', disabled: '已停用' };
+      const status = el('td');
+      const badge = el('span', `health-status health-status-${server.status || 'unknown'}`, statusLabels[server.status] || '待检测');
+      status.append(badge);
+      const latency = server.last_checked_at ? `${formatNumber(server.latency_ms)} ms` : '—';
+      const lastCheck = server.last_checked_at ? relativeTime(server.last_checked_at) : '尚未检测';
+      const actions = el('td', 'health-actions');
+      const check = el('button', 'icon-button');
+      check.type = 'button'; check.title = '立即检测'; check.setAttribute('aria-label', `立即检测 ${server.name}`);
+      check.disabled = !server.enabled;
+      check.innerHTML = '<i data-lucide="refresh-cw"></i>';
+      check.addEventListener('click', () => checkEmbyHealth(server, check));
+      const edit = el('button', 'icon-button');
+      edit.type = 'button'; edit.title = '编辑服务器'; edit.setAttribute('aria-label', `编辑 ${server.name}`);
+      edit.innerHTML = '<i data-lucide="pencil"></i>';
+      edit.addEventListener('click', () => editEmbyHealth(server));
+      const toggle = el('button', 'icon-button');
+      toggle.type = 'button'; toggle.title = server.enabled ? '停用监测' : '启用监测';
+      toggle.setAttribute('aria-label', `${toggle.title} ${server.name}`);
+      toggle.innerHTML = `<i data-lucide="${server.enabled ? 'pause' : 'play'}"></i>`;
+      toggle.addEventListener('click', () => toggleEmbyHealth(server));
+      const remove = el('button', 'icon-button danger-icon');
+      remove.type = 'button'; remove.title = '删除服务器'; remove.setAttribute('aria-label', `删除 ${server.name}`);
+      remove.innerHTML = '<i data-lucide="trash-2"></i>';
+      remove.addEventListener('click', () => deleteEmbyHealth(server));
+      actions.append(check, edit, toggle, remove);
+      row.append(identity, status, el('td', '', latency), el('td', '', availabilityLabel(server.availability_24h)),
+        el('td', '', availabilityLabel(server.availability_7d)), el('td', '', availabilityLabel(server.availability_30d)),
+        el('td', 'health-last-check', lastCheck), actions);
+      if (server.last_status_code) row.title = `最近 HTTP 状态码：${server.last_status_code}`;
+      fragment.append(row);
+    });
+    body.replaceChildren(fragment);
+    document.getElementById('emby-health-updated').textContent = latestCheck ? `最近检测 ${relativeTime(latestCheck)}` : '尚无检测记录';
+    window.lucide?.createIcons();
+  }
+
+  async function refreshEmbyHealth() {
+    renderEmbyHealth(await api('/_admin/api/emby-health'));
+  }
+
+  function resetEmbyHealthForm() {
+    state.embyHealthEditingID = null;
+    document.getElementById('emby-health-form').reset();
+    document.getElementById('emby-health-enabled').checked = true;
+    document.getElementById('emby-health-form-title').textContent = '添加监测服务器';
+    document.getElementById('emby-health-submit').innerHTML = '<i data-lucide="plus"></i><span>添加服务器</span>';
+    document.getElementById('emby-health-cancel-edit').hidden = true;
+    document.getElementById('emby-health-error').hidden = true;
+    window.lucide?.createIcons();
+  }
+
+  function editEmbyHealth(server) {
+    state.embyHealthEditingID = server.id;
+    document.getElementById('emby-health-group').value = server.group_name;
+    document.getElementById('emby-health-name').value = server.name;
+    document.getElementById('emby-health-line').value = server.line_name || '';
+    document.getElementById('emby-health-url').value = server.base_url;
+    document.getElementById('emby-health-note').value = server.note || '';
+    document.getElementById('emby-health-enabled').checked = server.enabled;
+    document.getElementById('emby-health-form-title').textContent = '编辑监测服务器';
+    document.getElementById('emby-health-submit').innerHTML = '<i data-lucide="save"></i><span>保存修改</span>';
+    document.getElementById('emby-health-cancel-edit').hidden = false;
+    document.getElementById('emby-health-error').hidden = true;
+    window.lucide?.createIcons();
+    document.getElementById('emby-health-group').focus();
+  }
+
+  async function saveEmbyHealth(event) {
+    event.preventDefault();
+    const error = document.getElementById('emby-health-error');
+    error.hidden = true;
+    const server = {
+      group_name: document.getElementById('emby-health-group').value.trim(),
+      name: document.getElementById('emby-health-name').value.trim(),
+      line_name: document.getElementById('emby-health-line').value.trim(),
+      base_url: document.getElementById('emby-health-url').value.trim(),
+      note: document.getElementById('emby-health-note').value.trim(),
+      enabled: document.getElementById('emby-health-enabled').checked
+    };
+    try {
+      const editingID = state.embyHealthEditingID;
+      await api(editingID ? `/_admin/api/emby-health/${editingID}` : '/_admin/api/emby-health', jsonOptions(editingID ? 'PUT' : 'POST', server));
+      resetEmbyHealthForm();
+      await refreshEmbyHealth();
+      toast(editingID ? '监测服务器已更新' : '监测服务器已添加');
+    } catch (failure) {
+      const messages = {
+        'invalid group name': '请输入有效的分组名称',
+        'invalid server name': '请输入有效的服务器名称',
+        'invalid server URL': '请输入有效的服务器地址',
+        'server URL must be an HTTP(S) base URL without credentials, query, or fragment': '地址必须是 HTTP(S) 基础地址，不能包含账号、查询参数或片段',
+        'maximum monitored server count reached': '最多只能监测 200 台服务器'
+      };
+      error.textContent = messages[failure.message] || '保存失败，请检查输入后重试';
+      error.hidden = false;
+    }
+  }
+
+  async function checkEmbyHealth(server, button) {
+    button.disabled = true;
+    button.querySelector('svg')?.classList.add('spinning');
+    try {
+      await api(`/_admin/api/emby-health/${server.id}/check`, { method: 'POST' });
+      await refreshEmbyHealth();
+      toast(`${server.name} 检测完成`);
+    } catch (failure) {
+      toast('检测请求失败');
+    } finally {
+      button.disabled = false;
+      button.querySelector('svg')?.classList.remove('spinning');
+    }
+  }
+
+  async function toggleEmbyHealth(server) {
+    try {
+      await api(`/_admin/api/emby-health/${server.id}`, jsonOptions('PUT', {
+        group_name: server.group_name, name: server.name, line_name: server.line_name || '', note: server.note || '',
+        base_url: server.base_url, enabled: !server.enabled
+      }));
+      await refreshEmbyHealth();
+      toast(server.enabled ? '监测已停用' : '监测已启用');
+    } catch (failure) { toast('服务器状态更新失败'); }
+  }
+
+  async function deleteEmbyHealth(server) {
+    const confirmed = await confirmAction({
+      title: '删除监测服务器', message: `删除“${server.group_name} / ${server.name}”后，其历史检测记录也会一并删除。`,
+      confirmLabel: '确认删除', icon: 'trash-2', danger: true
+    });
+    if (!confirmed) return;
+    try {
+      await api(`/_admin/api/emby-health/${server.id}`, { method: 'DELETE' });
+      await refreshEmbyHealth();
+      toast('监测服务器已删除');
+    } catch (failure) { toast('服务器删除失败'); }
   }
 
   function renderRequestFilters(statuses) {
@@ -499,6 +750,10 @@
       const row = document.createElement('tr');
       const target = el('td', 'host-cell');
       target.append(el('strong', '', log.host), el('small', '', log.path));
+      const deviceLabel = requestDeviceLabel(log);
+      const device = el('small', deviceLabel ? 'request-device' : 'request-device missing', deviceLabel ? `设备：${deviceLabel}` : '设备：未识别');
+      if (log.device_id) device.title = log.device_id;
+      target.append(device);
       const status = el('span', `status-code${log.status >= 400 ? ' error' : ''}`, String(log.status));
       const statusCell = document.createElement('td');
       statusCell.append(status);
@@ -848,11 +1103,29 @@
     if (!container || state.view !== 'overview') return;
     ensureGeographyMap().then(() => {
       if (!state.geoChart) state.geoChart = window.echarts.init(container, null, { renderer: 'canvas' });
+      if (!state.geoChartEventsBound) {
+        state.geoChart.on('georoam', () => {
+          const geo = state.geoChart?.getOption()?.geo?.[0];
+          if (!geo) return;
+          const center = Array.isArray(geo.center) && geo.center.length === 2 && geo.center.every((value) => Number.isFinite(Number(value)))
+            ? [Number(geo.center[0]), Number(geo.center[1])] : null;
+          const zoom = Number(geo.zoom);
+          if (Number.isFinite(zoom) && zoom > 0) state.geoView.zoom = zoom;
+          state.geoView.center = center;
+        });
+        state.geoChartEventsBound = true;
+      }
+      if (!state.geoWheelBound) {
+        container.addEventListener('wheel', (event) => {
+          event.preventDefault();
+          zoomGeographyMap(event.deltaY < 0 ? 1.18 : 0.85);
+        }, { passive: false });
+        state.geoWheelBound = true;
+      }
       const geography = state.geography || { regions: [], ips: [] };
       const regions = geography.regions || [];
       const ips = geography.ips || [];
       const palette = mapPalette();
-      const previousGeo = state.geoChart.getOption()?.geo?.[0] || {};
       const maximum = Math.max(1, ...regions.map((region) => Number(region.requests) || 0));
       const regionData = regions.map((region) => ({
         name: region.map_name,
@@ -870,7 +1143,7 @@
       }));
       empty.hidden = ipData.length > 0;
       empty.textContent = ipData.length ? '' : '暂无已定位的请求来源';
-      state.geoChart.setOption({
+      const option = {
         animation: false,
         backgroundColor: 'transparent',
         tooltip: {
@@ -891,7 +1164,7 @@
           inRange: { color: [palette.activeLow, palette.activeHigh] }
         },
         geo: {
-          map: 'refract-world', roam: true, zoom: Number(previousGeo.zoom) || 1.08, center: previousGeo.center || null,
+          map: 'refract-world', roam: 'move', zoom: state.geoView.zoom, center: state.geoView.center,
           scaleLimit: { min: 0.75, max: 12 }, layoutCenter: ['50%', '50%'], layoutSize: '108%',
           itemStyle: { areaColor: palette.area, borderColor: palette.border, borderWidth: 0.65 },
           emphasis: { itemStyle: { areaColor: palette.activeLow, borderColor: palette.activeHigh } },
@@ -909,7 +1182,19 @@
             emphasis: { scale: 1.25 }
           }
         ]
-      }, true);
+      };
+      if (state.geoChart.getOption()?.geo?.length) {
+        state.geoChart.setOption({
+          animation: option.animation,
+          backgroundColor: option.backgroundColor,
+          tooltip: option.tooltip,
+          visualMap: option.visualMap,
+          geo: { roam: 'move' },
+          series: option.series
+        });
+      } else {
+        state.geoChart.setOption(option, true);
+      }
       state.geoChart.resize();
     }).catch(() => {
       empty.hidden = false;
@@ -985,15 +1270,17 @@
 
   function zoomGeographyMap(factor) {
     if (!state.geoChart) return;
-    state.geoChart.dispatchAction({
-      type: 'geoRoam', componentType: 'geo', geoIndex: 0, zoom: factor,
-      originX: state.geoChart.getWidth() / 2, originY: state.geoChart.getHeight() / 2
-    });
+    const currentZoom = Number(state.geoView.zoom) || 1.08;
+    const nextZoom = Math.max(0.75, Math.min(12, currentZoom * factor));
+    if (nextZoom === currentZoom) return;
+    state.geoView.zoom = nextZoom;
+    state.geoChart.setOption({ geo: { center: state.geoView.center, zoom: nextZoom } });
   }
 
   function resetGeographyMap() {
     if (!state.geoChart) return;
-    state.geoChart.setOption({ geo: { center: null, zoom: 1.08 } });
+    state.geoView = { center: [0, 0], zoom: 1.08 };
+    state.geoChart.setOption({ geo: { center: [0, 0], zoom: 1.08 } });
   }
 
   function renderTraffic24h(value) {
@@ -1043,6 +1330,8 @@
 
   function renderPolicy(policy) {
     state.policy = policy;
+    renderDevicePolicy(policy.device_policy || { mode: 'off', rules: [] });
+    if (state.snapshot) renderCompactRequests(state.snapshot.recent);
     const mode = ['blacklist', 'whitelist'].includes(policy.mode) ? policy.mode : 'off';
     document.querySelectorAll('input[name="policy-mode"]').forEach((input) => { input.checked = input.value === mode; });
     const action = mode === 'blacklist' ? 'deny' : mode === 'whitelist' ? 'allow' : '';
@@ -1137,6 +1426,114 @@
     body.replaceChildren(fragment);
     window.lucide?.createIcons();
     if (state.snapshot) renderCompactTargets(state.snapshot.targets);
+  }
+
+  function renderDevicePolicy(policy) {
+    const mode = ['blacklist', 'whitelist'].includes(policy.mode) ? policy.mode : 'off';
+    const rules = policy.rules || [];
+    const playerRules = Array.isArray(policy.player_rules) ? policy.player_rules : [];
+    renderPlayerRules(playerRules);
+    const label = mode === 'blacklist' ? '黑名单' : mode === 'whitelist' ? '白名单' : '关闭';
+    document.querySelectorAll('input[name="device-policy-mode"]').forEach((input) => { input.checked = input.value === mode; });
+    document.getElementById('device-policy-summary').textContent = mode === 'blacklist' ?
+      `黑名单 · ${formatNumber(rules.length)} 台设备` :
+      mode === 'whitelist' ? `白名单 · 仅登记设备可访问 · ${formatNumber(rules.length)} 台设备` : '关闭 · 全部设备放行';
+    const idInput = document.getElementById('device-id');
+    const nameInput = document.getElementById('device-name');
+    const clientInput = document.getElementById('device-client');
+    const addButton = document.getElementById('device-rule-add');
+    [idInput, nameInput, clientInput].forEach((input) => { input.disabled = mode === 'off'; });
+    addButton.disabled = mode === 'off';
+    addButton.querySelector('span').textContent = mode === 'blacklist' ? '加入黑名单' : mode === 'whitelist' ? '加入白名单' : '选择模式后添加';
+    const body = document.getElementById('device-rules-table');
+    const empty = document.getElementById('device-rules-empty');
+    document.getElementById('device-policy-mode').setAttribute('aria-label', `${label}设备访问模式`);
+    if (!rules.length) {
+      body.replaceChildren();
+      empty.textContent = mode === 'off' ? '选择黑名单或白名单模式后管理设备' : `${label}中暂无设备`;
+      empty.hidden = false;
+      return;
+    }
+    empty.hidden = true;
+    const fragment = document.createDocumentFragment();
+    rules.forEach((rule) => {
+      const row = document.createElement('tr');
+      const name = el('td', 'device-rule-name', rule.device_name || '未命名设备');
+      const client = el('td', '', rule.client_name || '—');
+      const id = el('td', 'device-id-cell', rule.device_id);
+      id.title = rule.device_id;
+      const created = el('td', '', formatTime(rule.created_at));
+      const actions = el('td', 'rule-actions');
+      const remove = el('button', 'icon-button danger-icon');
+      remove.type = 'button';
+      remove.title = '删除设备规则';
+      remove.setAttribute('aria-label', `删除 ${rule.device_name || rule.device_id}`);
+      remove.innerHTML = '<i data-lucide="trash-2"></i>';
+      remove.addEventListener('click', () => deleteDeviceRule(rule));
+      actions.append(remove);
+      row.append(name, client, id, created, actions);
+      fragment.append(row);
+    });
+    body.replaceChildren(fragment);
+    window.lucide?.createIcons();
+  }
+
+  function renderPlayerRules(playerRules) {
+    document.getElementById('player-rule-count').textContent = `${formatNumber(playerRules.length)} 个播放器`;
+    const playerBody = document.getElementById('player-rules-table');
+    const playerEmpty = document.getElementById('player-rules-empty');
+    if (!playerRules.length) {
+      playerBody.replaceChildren();
+      playerEmpty.hidden = false;
+      return;
+    }
+    playerEmpty.hidden = true;
+    const playerFragment = document.createDocumentFragment();
+    playerRules.forEach((rule) => {
+      const row = document.createElement('tr');
+      const actions = el('td', 'rule-actions');
+      const remove = el('button', 'icon-button danger-icon');
+      remove.type = 'button';
+      remove.title = '解除播放器禁用';
+      remove.setAttribute('aria-label', `解除 ${rule.player_name} 的禁用`);
+      remove.innerHTML = '<i data-lucide="trash-2"></i>';
+      remove.addEventListener('click', () => deletePlayerRule(rule));
+      actions.append(remove);
+      row.append(el('td', 'device-rule-name', rule.player_name), el('td', '', rule.note || '—'), el('td', '', formatTime(rule.created_at)), actions);
+      playerFragment.append(row);
+    });
+    playerBody.replaceChildren(playerFragment);
+    window.lucide?.createIcons();
+  }
+
+  async function deleteDeviceRule(rule) {
+    const confirmed = await confirmAction({
+      title: '删除设备规则',
+      message: `删除 ${rule.device_name || rule.device_id} 后，该设备将按当前模式的默认策略处理。`,
+      confirmLabel: '确认删除', icon: 'trash-2', danger: true
+    });
+    if (!confirmed) return;
+    try {
+      const devicePolicy = await api(`/_admin/api/device-rules/${rule.id}`, { method: 'DELETE' });
+      state.policy.device_policy = devicePolicy;
+      renderDevicePolicy(devicePolicy);
+      toast('设备规则已删除');
+    } catch (failure) { toast('设备规则删除失败'); }
+  }
+
+  async function deletePlayerRule(rule) {
+    const confirmed = await confirmAction({
+      title: '解除播放器禁用',
+      message: `解除“${rule.player_name}”后，该客户端将恢复访问。`,
+      confirmLabel: '确认解除', icon: 'ban', danger: true
+    });
+    if (!confirmed) return;
+    try {
+      const devicePolicy = await api(`/_admin/api/player-rules/${rule.id}`, { method: 'DELETE' });
+      state.policy.device_policy = devicePolicy;
+      renderDevicePolicy(devicePolicy);
+      toast('播放器禁用已解除');
+    } catch (failure) { toast('播放器禁用解除失败'); }
   }
 
   function openQuotaDialog(rule) {
@@ -1527,6 +1924,7 @@
         await refreshRequests();
       }
       if (state.view === 'connections') await refreshConnections();
+      if (state.view === 'emby-health') await refreshEmbyHealth();
       if (state.view === 'reports') await refreshReport();
       if (state.view === 'audit') await refreshAudit();
       if (state.view === 'backups') await refreshBackups();
@@ -1555,6 +1953,8 @@
   async function switchView(view) {
     if (!viewMeta[view]) return;
     state.view = view;
+    clearInterval(state.embyHealthTimer);
+    state.embyHealthTimer = null;
     if (view === 'settings') renderSettingsSection();
     const meta = view === 'settings' ? settingsMeta[state.settingsSection] : viewMeta[view];
     document.querySelectorAll('.view').forEach((node) => node.classList.toggle('active', node.id === `view-${view}`));
@@ -1574,6 +1974,10 @@
       renderGeographyMap();
     });
     if (view === 'connections') refreshConnections().catch(() => toast('实时连接加载失败'));
+    if (view === 'emby-health') {
+      refreshEmbyHealth().catch(() => toast('健康监测加载失败'));
+      state.embyHealthTimer = window.setInterval(() => refreshEmbyHealth().catch(() => {}), 30_000);
+    }
     if (view === 'requests') refreshRequests().catch(() => toast('日志加载失败'));
     if (view === 'reports') {
       refreshReport().catch(() => toast('统计报表加载失败'));
@@ -1890,6 +2294,8 @@
       }
     });
     document.getElementById('refresh-button').addEventListener('click', () => refresh(true));
+    document.getElementById('emby-health-form').addEventListener('submit', saveEmbyHealth);
+    document.getElementById('emby-health-cancel-edit').addEventListener('click', resetEmbyHealthForm);
     document.getElementById('request-status-filters').addEventListener('click', (event) => {
       const button = event.target.closest('button[data-request-status]');
       if (!button || button.disabled || button.dataset.requestStatus === state.requestStatus) return;
@@ -1979,6 +2385,59 @@
         toast('规则模式更新失败');
       }
     }));
+    document.querySelectorAll('input[name="device-policy-mode"]').forEach((input) => input.addEventListener('change', async (event) => {
+      if (!event.currentTarget.checked) return;
+      const previousMode = state.policy?.device_policy?.mode || 'off';
+      const mode = event.currentTarget.value;
+      try {
+        const devicePolicy = await api('/_admin/api/device-policy', jsonOptions('PUT', { mode }));
+        state.policy.device_policy = devicePolicy;
+        renderDevicePolicy(devicePolicy);
+        toast(mode === 'blacklist' ? '已切换到设备黑名单模式' : mode === 'whitelist' ? '已切换到设备白名单模式' : '设备策略已关闭');
+      } catch (failure) {
+        document.querySelector(`input[name="device-policy-mode"][value="${previousMode}"]`).checked = true;
+        toast('设备策略模式更新失败');
+      }
+    }));
+    document.getElementById('device-rule-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const error = document.getElementById('device-rule-error');
+      error.hidden = true;
+      try {
+        const devicePolicy = await api('/_admin/api/device-rules', jsonOptions('POST', {
+          device_id: document.getElementById('device-id').value.trim(),
+          device_name: document.getElementById('device-name').value.trim(),
+          client_name: document.getElementById('device-client').value.trim()
+        }));
+        state.policy.device_policy = devicePolicy;
+        renderDevicePolicy(devicePolicy);
+        form.reset();
+        toast(state.policy.device_policy.mode === 'blacklist' ? '设备已加入黑名单' : '设备已加入白名单');
+      } catch (failure) {
+        error.textContent = failure.message === 'select blacklist or whitelist mode first' ? '请先选择黑名单或白名单模式' : '设备规则保存失败，请检查设备 ID';
+        error.hidden = false;
+      }
+    });
+    document.getElementById('player-rule-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const error = document.getElementById('player-rule-error');
+      error.hidden = true;
+      try {
+        const devicePolicy = await api('/_admin/api/player-rules', jsonOptions('POST', {
+          player_name: document.getElementById('player-name').value.trim(),
+          note: document.getElementById('player-note').value.trim()
+        }));
+        state.policy.device_policy = devicePolicy;
+        renderDevicePolicy(devicePolicy);
+        form.reset();
+        toast('播放器已禁用');
+      } catch (failure) {
+        error.textContent = failure.message === 'invalid player name' ? '请输入有效的播放器名称' : '播放器禁用保存失败，请检查输入';
+        error.hidden = false;
+      }
+    });
     document.getElementById('rule-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const form = event.currentTarget;

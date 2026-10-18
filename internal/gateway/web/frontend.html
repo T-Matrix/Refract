@@ -8,8 +8,8 @@
     <title>Refract · 通用反向代理</title>
     <link rel="icon" href="/_gateway/avatar">
     <link rel="apple-touch-icon" href="/_gateway/avatar">
-    <link rel="stylesheet" href="/_gateway/assets/frontend.css?v=1.15.0-20260817-2">
-    <script src="/_gateway/assets/frontend.js?v=1.15.0-20260817-2" defer></script>
+    <link rel="stylesheet" href="/_gateway/assets/frontend.css?v=1.15.0-20261017-emby-health-2">
+    <script src="/_gateway/assets/frontend.js?v=1.15.0-20261017-emby-health-2" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -120,6 +120,17 @@
             <h2>共享带宽保护</h2>
             <p>并发控制与单 IP 聚合限速共同保护出口，避免单个客户端占满带宽。</p>
           </article>
+        </div>
+      </section>
+
+      <section id="emby-health-section" class="health-band" aria-labelledby="health-title" hidden>
+        <div class="health-inner shell">
+          <div class="health-heading">
+            <div><p class="mono-label">Emby Network</p><h2 id="health-title">服务器状态</h2></div>
+            <p id="health-updated" class="health-updated">等待状态数据</p>
+          </div>
+          <div id="health-groups" class="health-groups"></div>
+          <p class="health-footnote">监测可用率按本服务记录的探测样本统计。</p>
         </div>
       </section>
 

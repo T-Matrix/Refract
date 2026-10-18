@@ -22,6 +22,9 @@ type connectionFlow struct {
 	path          string
 	category      string
 	userAgent     string
+	deviceID      string
+	deviceName    string
+	clientName    string
 	cancel        context.CancelFunc
 	uploadTotal   atomic.Int64
 	downloadTotal atomic.Int64
@@ -43,6 +46,7 @@ type connectionSnapshot struct {
 	Path          string `json:"path"`
 	Category      string `json:"category"`
 	UserAgent     string `json:"user_agent"`
+	ClientName    string `json:"client_name"`
 	UploadBPS     int64  `json:"upload_bps"`
 	DownloadBPS   int64  `json:"download_bps"`
 	UploadTotal   int64  `json:"upload_total"`
@@ -113,6 +117,14 @@ func (t *connectionTracker) Close() {
 }
 
 func (t *connectionTracker) Start(cancel context.CancelFunc, clientIP, method, host, domain, path, category, userAgent string) *connectionFlow {
+	return t.StartForDevice(cancel, clientIP, method, host, domain, path, category, userAgent, "")
+}
+
+func (t *connectionTracker) StartForDevice(cancel context.CancelFunc, clientIP, method, host, domain, path, category, userAgent, deviceID string) *connectionFlow {
+	return t.StartForIdentity(cancel, clientIP, method, host, domain, path, category, userAgent, deviceID, "")
+}
+
+func (t *connectionTracker) StartForIdentity(cancel context.CancelFunc, clientIP, method, host, domain, path, category, userAgent, deviceID, clientName string) *connectionFlow {
 	if t == nil {
 		return nil
 	}
@@ -123,12 +135,31 @@ func (t *connectionTracker) Start(cancel context.CancelFunc, clientIP, method, h
 	flow := &connectionFlow{
 		id: hex.EncodeToString(identifier), started: time.Now(), cancel: cancel,
 		clientIP: clientIP, method: method, host: host, domain: domain,
-		path: truncateRunes(path, 256), category: category, userAgent: truncateRunes(userAgent, 160),
+		path: truncateRunes(path, 256), category: category, userAgent: truncateRunes(userAgent, 160), deviceID: deviceID,
+		clientName: truncateRunes(clientName, 128),
 	}
 	t.mu.Lock()
 	t.items[flow.id] = flow
 	t.mu.Unlock()
 	return flow
+}
+
+func (t *connectionTracker) CancelDisallowedDevices(policy *devicePolicy) int {
+	if t == nil || policy == nil {
+		return 0
+	}
+	t.mu.RLock()
+	cancels := make([]context.CancelFunc, 0)
+	for _, flow := range t.items {
+		if !policy.AllowsIdentity(flow.deviceID, flow.clientName) {
+			cancels = append(cancels, flow.cancel)
+		}
+	}
+	t.mu.RUnlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+	return len(cancels)
 }
 
 func (t *connectionTracker) Finish(flow *connectionFlow) {
@@ -181,7 +212,7 @@ func (t *connectionTracker) Snapshot() []connectionSnapshot {
 		result = append(result, connectionSnapshot{
 			ID: item.id, StartedAt: item.started.Unix(), DurationMS: now.Sub(item.started).Milliseconds(),
 			ClientIP: item.clientIP, Method: item.method, Host: item.host, Domain: item.domain,
-			Path: item.path, Category: item.category, UserAgent: item.userAgent,
+			Path: item.path, Category: item.category, UserAgent: item.userAgent, ClientName: item.clientName,
 			UploadBPS: item.uploadRate.Load(), DownloadBPS: item.downloadRate.Load(),
 			UploadTotal: item.uploadTotal.Load(), DownloadTotal: item.downloadTotal.Load(),
 		})
