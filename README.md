@@ -198,9 +198,9 @@ https://proxy.example.com/http://emby.example.com:8096
 
 访问规则只比较目标域名，与 URL 路径无关。`example.com` 会匹配自身和 `media.example.com`，不会误匹配 `badexample.com`：
 
-- **关闭**：保存的名单不参与判断，所有符合初始目标和安全策略的域名放行。
-- **黑名单**：名单内域名拒绝，其他域名放行。
-- **白名单**：只有名单内域名放行，其他域名拒绝。
+- **关闭**：面板保存的名单不参与判断；动态目标仍需匹配 `DEFAULT_UPSTREAM`、`ALLOWED_UPSTREAMS` 或有效签名。
+- **黑名单**：启用后由面板规则直接决定动态目标授权，名单内域名拒绝，其他域名放行，不需要把其他域名重复写入 `ALLOWED_UPSTREAMS`。
+- **白名单**：启用后只有面板中已启用的允许规则放行动态目标，不需要把这些域名重复写入 `ALLOWED_UPSTREAMS`。
 
 白名单中的每个域名可以单独设置累计单向下行额度，留空或设为 `0` 表示不限额。额度单位按 `1 GB = 1024³` 字节换算，只累计实际成功写给客户端的响应正文；上传流量、失败写入和协议开销不计入。达到额度后当前 HTTP 流或 WebSocket 会在额度字节边界停止，同一规则下的新请求返回拒绝响应。修改额度默认保留已用流量，面板可单独重置已用值。
 
@@ -216,7 +216,7 @@ https://proxy.example.com/http://emby.example.com:8096
 | --- | --- | --- |
 | `PROXY_DOMAIN` | 必填 | 已解析到 VPS 的公网域名 |
 | `DEFAULT_UPSTREAM` | 空 | 客户端不携带完整 URL 时使用的默认上游 |
-| `ALLOWED_UPSTREAMS` | 空 | 允许直接访问的初始目标，逗号分隔，支持 `*.example.com` |
+| `ALLOWED_UPSTREAMS` | 空 | 面板域名策略关闭时允许直接访问的初始目标，逗号分隔，支持 `*.example.com`；启用面板黑名单或白名单后，以面板策略为准 |
 | `SIGNING_SECRET` | 必填 | 至少 32 字符，用于动态推流 URL 签名 |
 | `SIGNED_URL_TTL` | `24h` | 动态签名链接有效期 |
 | `ALLOW_UNSIGNED_TARGETS` | `false` | 允许任意公网目标，即通用开放模式 |
@@ -290,7 +290,7 @@ TRUST_PROXY_HEADERS=true
 
 ## 安全模型
 
-- 安全模式下，未签名初始 URL 必须匹配 `DEFAULT_UPSTREAM` 或 `ALLOWED_UPSTREAMS`。
+- 面板域名策略关闭时，未签名初始 URL 必须匹配 `DEFAULT_UPSTREAM` 或 `ALLOWED_UPSTREAMS`；启用黑名单或白名单后，动态目标由面板规则授权。
 - 自动发现的 CDN URL 必须携带服务端 HMAC 签名，并受有效期限制。
 - 目标域名解析结果固定，连接前后都检查私网、回环和保留地址。
 - 默认不向上游传递客户端真实 IP，并移除常见代理与 Cloudflare 特征头。

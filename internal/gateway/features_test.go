@@ -178,6 +178,34 @@ func TestPolicyCanBeManagedAndBlocksBeforeDNS(t *testing.T) {
 	}
 }
 
+func TestPanelWhitelistAllowsDynamicRequestWithoutEnvironmentAllowlist(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte("panel allowlist works"))
+	}))
+	defer upstream.Close()
+
+	gateway := newAdminTestGateway(t)
+	gateway.resolver = newSafeResolver(time.Minute, true)
+	cookie := loginAdmin(t, gateway)
+	mode := adminRequest(t, gateway, http.MethodPut, "/_admin/api/policy", map[string]string{"mode": proxyModeWhitelist}, cookie, true)
+	if mode.Code != http.StatusOK {
+		t.Fatalf("enable whitelist status=%d body=%s", mode.Code, mode.Body.String())
+	}
+	allowed := adminRequest(t, gateway, http.MethodPut, "/_admin/api/rules/domain", map[string]any{
+		"access": "allow", "domain": "127.0.0.1",
+	}, cookie, true)
+	if allowed.Code != http.StatusOK {
+		t.Fatalf("add panel allow rule status=%d body=%s", allowed.Code, allowed.Body.String())
+	}
+
+	proxyRequest := httptest.NewRequest(http.MethodGet, "https://proxy.test/"+upstream.URL+"/health", nil)
+	recorder := httptest.NewRecorder()
+	gateway.ServeHTTP(recorder, proxyRequest)
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "panel allowlist works" {
+		t.Fatalf("panel-allowed dynamic target status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestProxyPolicyDefaultsOffAndMigratesLegacyRules(t *testing.T) {
 	gateway := newAdminTestGateway(t)
 	if gateway.policy.Load().Mode != proxyModeOff {

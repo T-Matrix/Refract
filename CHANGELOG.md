@@ -2,6 +2,19 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的结构，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.17.0] - 2026-10-19
+
+### 修复
+
+- 面板黑名单和白名单现在可以直接授权动态目标，不再要求把同一域名重复写入 `ALLOWED_UPSTREAMS`。
+- 关闭域名策略时仍保持动态目标默认拒绝，避免无意中开放通用反代。
+- 线路和备注字段支持完整保存、编辑、公开展示，并在数据库备份恢复后保留。
+
+### 安全
+
+- 黑名单模式只在管理员明确启用后放行未命中的动态目标，具体拦截仍由面板策略执行。
+- 白名单模式只授权已启用的面板允许规则，未列出的域名继续拒绝。
+
 ## [1.16.0] - 2026-10-18
 
 ### 新增
@@ -170,3 +183,4 @@
 [1.14.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.14.0
 [1.15.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.15.0
 [1.16.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.16.0
+[1.17.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.17.0

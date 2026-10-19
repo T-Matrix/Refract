@@ -436,7 +436,27 @@ func (g *Gateway) authorizeDynamicTarget(target *url.URL, expires, signature str
 	if g.cfg.AllowUnsigned {
 		return true
 	}
-	return expires != "" && signature != "" && g.signer.Verify(target, expires, signature)
+	if expires != "" && signature != "" && g.signer.Verify(target, expires, signature) {
+		return true
+	}
+
+	// When an administrator explicitly enables a domain policy, that policy is
+	// also the source of truth for dynamic targets. Otherwise a panel-managed
+	// whitelist could never pass the earlier environment allowlist gate, and a
+	// blacklist could not implement its advertised "allow everything else"
+	// behavior. Policy-off keeps the closed-by-default behavior above.
+	policy := g.policy.Load()
+	if policy == nil {
+		return false
+	}
+	switch policy.Mode {
+	case proxyModeBlacklist:
+		return true
+	case proxyModeWhitelist:
+		return policy.matchingRule(normalizeHost(target.Hostname()), "allow") != nil
+	default:
+		return false
+	}
 }
 
 func (g *Gateway) rewriteRequest(proxyRequest *httputil.ProxyRequest) {

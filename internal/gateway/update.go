@@ -25,11 +25,11 @@ import (
 	"time"
 )
 
-var Version = "1.16.0"
+var Version = "1.17.0"
 
 const currentReleaseNotes = `## 新增功能
 
-- 管理员可以维护 Emby 服务器分组、线路和备注，并查看在线状态、SLA 与延迟。
+- 管理员可以维护 Emby 服务器分组、线路和备注，并查看在线状态、SLA 与延迟；线路和备注支持编辑、公开展示和备份恢复。
 - 支持按播放器名称禁用播放器，阻止不符合策略的播放请求。
 - 支持设备黑名单、白名单，并在最近请求中识别设备信息。
 - 最近请求支持将设备一键加入黑名单或白名单。
@@ -42,9 +42,11 @@ const currentReleaseNotes = `## 新增功能
 ## 安全
 
 - 黑白名单策略在代理请求进入和设备识别后统一执行，避免通过不同请求路径绕过策略。
-- 播放器禁用规则与设备策略均持久化到 SQLite，并随备份保留。`
+- 播放器禁用规则与设备策略均持久化到 SQLite，并随备份保留。
+- 面板域名策略启用后直接参与动态目标授权，不再要求重复填写 ALLOWED_UPSTREAMS。
+- 运行配置明确说明环境允许列表与面板策略的授权关系。`
 
-const currentReleasePublishedAt = "2026-10-18T00:00:00+08:00"
+const currentReleasePublishedAt = "2026-10-19T00:00:00+08:00"
 
 const (
 	defaultReleaseAPI        = "https://api.github.com/repos/T-Matrix/Refract/releases/latest"

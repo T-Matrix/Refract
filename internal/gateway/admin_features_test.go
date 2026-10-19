@@ -559,6 +559,13 @@ func TestAuditSanitizesSecretsAndQueryParameters(t *testing.T) {
 func TestBackupCreateImportRestoreAndPreserveAdministrator(t *testing.T) {
 	gateway := newAdminTestGateway(t)
 	ctx := context.Background()
+	healthServer, err := normalizeEmbyHealthServerDetails("备份分组", "备份节点", "电信线路", "保留线路备注", "https://backup.example.com", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gateway.telemetry.SaveEmbyHealthServer(ctx, healthServer); err != nil {
+		t.Fatal(err)
+	}
 	if err := gateway.telemetry.setSetting(ctx, "restore_marker", "before"); err != nil {
 		t.Fatal(err)
 	}
@@ -593,6 +600,10 @@ func TestBackupCreateImportRestoreAndPreserveAdministrator(t *testing.T) {
 	marker, err := gateway.telemetry.setting(ctx, "restore_marker")
 	if err != nil || marker != "before" {
 		t.Fatalf("restored marker=%q err=%v", marker, err)
+	}
+	restoredHealth, err := gateway.telemetry.EmbyHealthServers(ctx, true)
+	if err != nil || len(restoredHealth) != 1 || restoredHealth[0].LineName != "电信线路" || restoredHealth[0].Note != "保留线路备注" {
+		t.Fatalf("restored health metadata=%#v err=%v", restoredHealth, err)
 	}
 	authAfterRestore, err := gateway.telemetry.AuthRecord(ctx, "admin")
 	if err != nil {

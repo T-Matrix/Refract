@@ -415,6 +415,33 @@ func TestGatewayBlocksPrivateAndUnauthorizedTargets(t *testing.T) {
 	}
 }
 
+func TestPanelDomainPolicyAuthorizesDynamicTargetsWithoutEnvironmentAllowlist(t *testing.T) {
+	target := mustURL(t, "https://media.example.com/library/item")
+	gateway := New(testConfig())
+	defer gateway.Close()
+
+	if gateway.authorizeDynamicTarget(target, "", "") {
+		t.Fatal("policy-off gateway authorized an unsigned dynamic target")
+	}
+
+	gateway.policy.Store(&proxyPolicy{Mode: proxyModeWhitelist, Rules: []proxyRule{
+		{Action: "allow", DomainSuffix: "media.example.com", Enabled: true},
+	}})
+	if !gateway.authorizeDynamicTarget(target, "", "") {
+		t.Fatal("panel whitelist did not authorize its allowed domain")
+	}
+	if gateway.authorizeDynamicTarget(mustURL(t, "https://other.example.com/library/item"), "", "") {
+		t.Fatal("panel whitelist authorized an unlisted domain")
+	}
+
+	gateway.policy.Store(&proxyPolicy{Mode: proxyModeBlacklist, Rules: []proxyRule{
+		{Action: "deny", DomainSuffix: "blocked.example.com", Enabled: true},
+	}})
+	if !gateway.authorizeDynamicTarget(target, "", "") {
+		t.Fatal("panel blacklist did not authorize an unblocked domain")
+	}
+}
+
 func TestCanceledProxyRequestIsRecordedAs499(t *testing.T) {
 	gateway := New(testConfig())
 	defer gateway.Close()

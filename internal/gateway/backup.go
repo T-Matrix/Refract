@@ -403,6 +403,9 @@ func (s *telemetryStore) restoreSQLite(ctx context.Context, path string) error {
 			return err
 		}
 	}
+	if err := restoreEmbyHealthTables(ctx, tx); err != nil {
+		return err
+	}
 	var quotaColumns int
 	if err := tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM pragma_table_info('proxy_rules','restored') WHERE name IN ('quota_bytes','quota_used_bytes')`,
@@ -418,6 +421,56 @@ func (s *telemetryStore) restoreSQLite(ctx context.Context, path string) error {
 		}
 	}
 	return tx.Commit()
+}
+
+func restoreEmbyHealthTables(ctx context.Context, tx *sql.Tx) error {
+	var serverTable, checkTable int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM restored.sqlite_master WHERE type='table' AND name='monitored_emby_servers'`).Scan(&serverTable); err != nil {
+		return err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM restored.sqlite_master WHERE type='table' AND name='emby_health_checks'`).Scan(&checkTable); err != nil {
+		return err
+	}
+	if serverTable == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM main.emby_health_checks`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM main.monitored_emby_servers`); err != nil {
+		return err
+	}
+	var lineName, note int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM restored.pragma_table_info('monitored_emby_servers') WHERE name='line_name'`).Scan(&lineName); err != nil {
+		return err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM restored.pragma_table_info('monitored_emby_servers') WHERE name='note'`).Scan(&note); err != nil {
+		return err
+	}
+	if lineName == 1 && note == 1 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO main.monitored_emby_servers
+			(id,group_name,name,line_name,note,base_url,enabled,config_version,created_at,updated_at)
+			SELECT id,group_name,name,line_name,note,base_url,enabled,config_version,created_at,updated_at
+			FROM restored.monitored_emby_servers`); err != nil {
+			return err
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO main.monitored_emby_servers
+			(id,group_name,name,base_url,enabled,config_version,created_at,updated_at)
+			SELECT id,group_name,name,base_url,enabled,config_version,created_at,updated_at
+			FROM restored.monitored_emby_servers`); err != nil {
+			return err
+		}
+	}
+	if checkTable == 1 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO main.emby_health_checks
+			(id,server_id,checked_at,success,latency_ms,status_code)
+			SELECT id,server_id,checked_at,success,latency_ms,status_code
+			FROM restored.emby_health_checks`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *telemetryStore) LoadBackupConfig(ctx context.Context) (backupConfig, error) {

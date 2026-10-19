@@ -165,7 +165,7 @@ func TestEmbyHealthAdminAPIAuthCRUDAndPublicEndpoint(t *testing.T) {
 	payload["base_url"] = "https://updated.example.com"
 	payload["enabled"] = false
 	updated := adminRequest(t, gateway, http.MethodPut, "/_admin/api/emby-health/"+strconv.FormatInt(createdServer.ID, 10), payload, cookie, true)
-	if updated.Code != http.StatusOK || !strings.Contains(updated.Body.String(), "备用节点") || !strings.Contains(updated.Body.String(), "联通备用") || !strings.Contains(updated.Body.String(), `"enabled":false`) {
+	if updated.Code != http.StatusOK || !strings.Contains(updated.Body.String(), "备用节点") || !strings.Contains(updated.Body.String(), "联通备用") || !strings.Contains(updated.Body.String(), "仅夜间启用") || !strings.Contains(updated.Body.String(), `"enabled":false`) {
 		t.Fatalf("update health server status=%d body=%s", updated.Code, updated.Body.String())
 	}
 
