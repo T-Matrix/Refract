@@ -2,6 +2,18 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的结构，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.18.0] - 2026-10-19
+
+### 新增
+
+- 将播放器管理统一为“禁用播放器”，支持关闭、黑名单和白名单模式，并可从最近请求一键添加播放器。
+- 首页访问记录、最近请求和统计报表自动匹配 Emby 健康监测中配置的服务器名、线路和备注。
+
+### 修复
+
+- 播放器访问策略按 Emby 客户端名称统一判断；已有禁用播放器规则在升级后默认按黑名单继续生效。
+- 线路匹配时区分主机和端口，避免同一域名下不同 Emby 服务错误共用备注。
+
 ## [1.17.0] - 2026-10-19
 
 ### 修复
@@ -184,3 +196,4 @@
 [1.15.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.15.0
 [1.16.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.16.0
 [1.17.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.17.0
+[1.18.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.18.0

@@ -285,16 +285,16 @@ func (g *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	policy := g.policy.Load()
 	policyCheckedAt := time.Now()
 	device := requestDeviceIdentity(request)
-	if !policy.DevicePolicy.AllowsIdentity(device.ID, device.ClientName) {
+	if !policy.PlayerPolicy.AllowsClient(device.ClientName) {
 		g.blocked.Add(1)
 		if g.telemetry != nil {
 			g.telemetry.Record(telemetryEvent{
 				Timestamp: time.Now(), ClientIP: client, Host: target.Host, Scheme: target.Scheme, Method: request.Method,
 				DeviceID: device.ID, DeviceName: device.DeviceName, ClientName: device.ClientName,
-				Path: target.EscapedPath(), Category: "device-policy", Status: http.StatusForbidden,
+				Path: target.EscapedPath(), Category: "player-policy", Status: http.StatusForbidden,
 			})
 		}
-		writeGatewayError(writer, http.StatusForbidden, "device is blocked by proxy device policy")
+		writeGatewayError(writer, http.StatusForbidden, "player is blocked by proxy player policy")
 		return
 	}
 	allowed, quotaRule := policy.evaluateAt(target, policyCheckedAt)

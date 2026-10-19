@@ -42,20 +42,24 @@ type telemetryEvent struct {
 }
 
 type requestLog struct {
-	ID         int64  `json:"id"`
-	Timestamp  int64  `json:"timestamp"`
-	Host       string `json:"host"`
-	Scheme     string `json:"scheme"`
-	DeviceID   string `json:"device_id"`
-	DeviceName string `json:"device_name"`
-	ClientName string `json:"client_name"`
-	Method     string `json:"method"`
-	Path       string `json:"path"`
-	Category   string `json:"category"`
-	Status     int    `json:"status"`
-	BytesIn    int64  `json:"bytes_in"`
-	BytesOut   int64  `json:"bytes_out"`
-	DurationMS int64  `json:"duration_ms"`
+	ID             int64  `json:"id"`
+	Timestamp      int64  `json:"timestamp"`
+	Host           string `json:"host"`
+	Scheme         string `json:"scheme"`
+	EmbyServerName string `json:"emby_server_name,omitempty"`
+	EmbyGroupName  string `json:"emby_group_name,omitempty"`
+	EmbyLineName   string `json:"emby_line_name,omitempty"`
+	EmbyNote       string `json:"emby_note,omitempty"`
+	DeviceID       string `json:"device_id"`
+	DeviceName     string `json:"device_name"`
+	ClientName     string `json:"client_name"`
+	Method         string `json:"method"`
+	Path           string `json:"path"`
+	Category       string `json:"category"`
+	Status         int    `json:"status"`
+	BytesIn        int64  `json:"bytes_in"`
+	BytesOut       int64  `json:"bytes_out"`
+	DurationMS     int64  `json:"duration_ms"`
 }
 
 type requestLogStatusCount struct {
@@ -73,13 +77,17 @@ type requestLogPage struct {
 }
 
 type targetSummary struct {
-	Host       string `json:"host"`
-	Domain     string `json:"domain"`
-	Requests   int64  `json:"requests"`
-	BytesOut   int64  `json:"bytes_out"`
-	Errors     int64  `json:"errors"`
-	AvgLatency int64  `json:"avg_latency_ms"`
-	LastSeen   int64  `json:"last_seen"`
+	Host           string `json:"host"`
+	Domain         string `json:"domain"`
+	EmbyServerName string `json:"emby_server_name,omitempty"`
+	EmbyGroupName  string `json:"emby_group_name,omitempty"`
+	EmbyLineName   string `json:"emby_line_name,omitempty"`
+	EmbyNote       string `json:"emby_note,omitempty"`
+	Requests       int64  `json:"requests"`
+	BytesOut       int64  `json:"bytes_out"`
+	Errors         int64  `json:"errors"`
+	AvgLatency     int64  `json:"avg_latency_ms"`
+	LastSeen       int64  `json:"last_seen"`
 }
 
 type trafficPoint struct {

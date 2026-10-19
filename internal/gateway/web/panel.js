@@ -400,7 +400,12 @@
     targets.slice(0, 4).forEach((target) => {
       const row = el('div', 'compact-row compact-target-row');
       const copy = el('div');
-      copy.append(el('strong', '', target.host), el('small', '', `${formatNumber(target.requests)} 次请求 · ${target.avg_latency_ms} ms`));
+      const displayName = String(target.emby_server_name || '').trim() || target.host;
+      copy.append(el('strong', '', displayName));
+      if (displayName !== target.host) copy.append(el('small', 'target-host', target.host));
+      if (target.emby_line_name) copy.append(el('small', 'target-line', `线路：${target.emby_line_name}`));
+      if (target.emby_note) copy.append(el('small', 'target-note', `备注：${target.emby_note}`));
+      copy.append(el('small', 'target-stats', `${formatNumber(target.requests)} 次请求 · ${target.avg_latency_ms} ms`));
       const actions = el('div', 'target-actions');
       actions.append(el('span', 'target-traffic', formatBytes(target.bytes_out)), domainActionButton(target));
       row.append(copy, actions);
@@ -419,62 +424,57 @@
     return client && client !== name ? `${identity} · ${client}` : identity;
   }
 
-  function requestDeviceAction(log) {
-    const deviceID = String(log.device_id || '').trim();
-    if (!deviceID) return el('span', 'request-device-missing', '未识别设备');
-    const devicePolicy = state.policy?.device_policy || { mode: 'off', rules: [] };
-    const mode = devicePolicy.mode;
+  function requestPlayerAction(log) {
+    const playerName = String(log.client_name || '').trim();
+    if (!playerName) return el('span', 'request-device-missing', '未识别播放器');
+    const playerPolicy = state.policy?.player_policy || { mode: 'off', rules: [] };
+    const mode = playerPolicy.mode;
     const modeLabel = mode === 'blacklist' ? '黑名单' : mode === 'whitelist' ? '白名单' : '';
     if (mode === 'off') {
-      const button = el('button', 'device-action-button off');
+      const button = el('button', 'player-action-button off');
       button.type = 'button';
       button.disabled = true;
-      button.title = '请先在访问规则中选择设备策略';
+      button.title = '请先选择播放器黑名单或白名单模式';
       button.setAttribute('aria-label', button.title);
-      button.append(document.createElement('i'), el('span', '', '选择策略'));
+      button.append(document.createElement('i'), el('span', '', '选择模式'));
       button.firstElementChild.dataset.lucide = 'shield';
       return button;
     }
-    const existing = (devicePolicy.rules || []).find((rule) => rule.enabled !== false && rule.device_id === deviceID);
+    const existing = (playerPolicy.rules || []).find((rule) => rule.enabled !== false && rule.player_name?.toLowerCase() === playerName.toLowerCase());
     if (existing) {
       const badge = el('span', 'request-device-added');
-      badge.append(el('i', '', ''), el('span', '', `已在${modeLabel || '设备名单'}`));
+      badge.append(el('i', '', ''), el('span', '', `已在${modeLabel}`));
       badge.firstElementChild.dataset.lucide = 'shield-check';
       return badge;
     }
-    const button = el('button', `device-action-button ${mode || 'off'}`);
+    const button = el('button', `player-action-button ${mode}`);
     button.type = 'button';
-    button.disabled = mode === 'off';
-    button.title = mode === 'off' ? '请先在访问规则中选择设备策略' : `加入${modeLabel}`;
+    button.title = `将 ${playerName} 加入${modeLabel}`;
     button.setAttribute('aria-label', button.title);
     const icon = document.createElement('i');
     icon.dataset.lucide = mode === 'whitelist' ? 'shield-check' : 'shield-ban';
-    button.append(icon, el('span', '', mode === 'off' ? '选择策略' : `加入${modeLabel}`));
-    if (mode !== 'off') button.addEventListener('click', () => addDeviceRuleFromRequest(log, button));
+    button.append(icon, el('span', '', `加入${modeLabel}`));
+    button.addEventListener('click', () => addPlayerRuleFromRequest(log, button));
     return button;
   }
 
-  async function addDeviceRuleFromRequest(log, button) {
-    const deviceID = String(log.device_id || '').trim();
-    const devicePolicy = state.policy?.device_policy || { mode: 'off', rules: [] };
-    if (!deviceID || !['blacklist', 'whitelist'].includes(devicePolicy.mode)) {
-      toast('请先选择设备黑名单或白名单模式');
+  async function addPlayerRuleFromRequest(log, button) {
+    const playerName = String(log.client_name || '').trim();
+    const playerPolicy = state.policy?.player_policy || { mode: 'off', rules: [] };
+    if (!playerName || !['blacklist', 'whitelist'].includes(playerPolicy.mode)) {
+      toast('请先选择播放器黑名单或白名单模式');
       return;
     }
     button.disabled = true;
     try {
-      const updated = await api('/_admin/api/device-rules', jsonOptions('POST', {
-        device_id: deviceID,
-        device_name: String(log.device_name || '').trim(),
-        client_name: String(log.client_name || '').trim()
-      }));
-      state.policy.device_policy = updated;
-      renderDevicePolicy(updated);
+      const updated = await api('/_admin/api/player-rules', jsonOptions('POST', { player_name: playerName }));
+      state.policy.player_policy = updated;
+      renderPlayerPolicy(updated);
       if (state.snapshot) renderCompactRequests(state.snapshot.recent);
-      toast(updated.mode === 'blacklist' ? '设备已加入黑名单' : '设备已加入白名单');
+      toast(updated.mode === 'blacklist' ? '播放器已加入黑名单' : '播放器已加入白名单');
     } catch (failure) {
       button.disabled = false;
-      toast(failure.message === 'select blacklist or whitelist mode first' ? '请先选择设备策略' : '设备规则保存失败');
+      toast(failure.message === 'select blacklist or whitelist mode first' ? '请先选择播放器名单模式' : '播放器规则保存失败');
     }
   }
 
@@ -485,13 +485,17 @@
     logs.slice(0, 4).forEach((log) => {
       const row = el('div', 'compact-row');
       const copy = el('div');
-      copy.append(el('strong', '', log.host), el('small', '', `${log.method} ${log.path}`));
+      const displayName = String(log.emby_server_name || '').trim() || log.host;
+      copy.append(el('strong', '', displayName), el('small', '', `${log.method} ${log.path}`));
+      if (displayName !== log.host) copy.append(el('small', 'target-host', `访问：${log.host}`));
+      if (log.emby_line_name) copy.append(el('small', 'target-line', `线路：${log.emby_line_name}`));
+      if (log.emby_note) copy.append(el('small', 'target-note', `备注：${log.emby_note}`));
       const deviceLabel = requestDeviceLabel(log);
       const device = el('small', deviceLabel ? 'request-device' : 'request-device missing', deviceLabel ? `设备：${deviceLabel}` : '设备：未识别');
       if (log.device_id) device.title = log.device_id;
       copy.append(device);
       const meta = el('div', 'request-actions');
-      meta.append(el('span', 'request-status', `${log.status} · ${log.duration_ms} ms`), requestDeviceAction(log));
+      meta.append(el('span', 'request-status', `${log.status} · ${log.duration_ms} ms`), requestPlayerAction(log));
       row.append(copy, meta);
       fragment.append(row);
     });
@@ -509,7 +513,12 @@
     targets.forEach((target) => {
       const row = document.createElement('tr');
       const host = el('td', 'host-cell');
-      host.append(el('strong', '', target.host), el('small', '', `最近活动 ${relativeTime(target.last_seen)}`));
+      const displayName = String(target.emby_server_name || '').trim() || target.host;
+      host.append(el('strong', '', displayName));
+      if (displayName !== target.host) host.append(el('small', 'target-host', target.host));
+      if (target.emby_line_name) host.append(el('small', 'target-line', `线路：${target.emby_line_name}`));
+      if (target.emby_note) host.append(el('small', 'target-note', `备注：${target.emby_note}`));
+      host.append(el('small', 'target-stats', `最近活动 ${relativeTime(target.last_seen)}`));
       [host, el('td', '', formatNumber(target.requests)), el('td', '', formatBytes(target.bytes_out)),
         el('td', '', formatNumber(target.errors)), el('td', '', `${target.avg_latency_ms} ms`),
         el('td', '', formatTime(target.last_seen))].forEach((cell) => row.append(cell));
@@ -749,7 +758,11 @@
     logs.forEach((log) => {
       const row = document.createElement('tr');
       const target = el('td', 'host-cell');
-      target.append(el('strong', '', log.host), el('small', '', log.path));
+      const displayName = String(log.emby_server_name || '').trim() || log.host;
+      target.append(el('strong', '', displayName), el('small', '', log.path));
+      if (displayName !== log.host) target.append(el('small', 'target-host', `访问：${log.host}`));
+      if (log.emby_line_name) target.append(el('small', 'target-line', `线路：${log.emby_line_name}`));
+      if (log.emby_note) target.append(el('small', 'target-note', `备注：${log.emby_note}`));
       const deviceLabel = requestDeviceLabel(log);
       const device = el('small', deviceLabel ? 'request-device' : 'request-device missing', deviceLabel ? `设备：${deviceLabel}` : '设备：未识别');
       if (log.device_id) device.title = log.device_id;
@@ -1017,7 +1030,13 @@
       const fragment = document.createDocumentFragment();
       report.top_targets.forEach((target) => {
         const row = document.createElement('tr');
-        [el('td', 'host-cell', target.host), el('td', '', formatNumber(target.requests)), el('td', '', formatBytes(target.bytes_out)),
+        const host = el('td', 'host-cell');
+        const displayName = String(target.emby_server_name || '').trim() || target.host;
+        host.append(el('strong', '', displayName));
+        if (displayName !== target.host) host.append(el('small', 'target-host', target.host));
+        if (target.emby_line_name) host.append(el('small', 'target-line', `线路：${target.emby_line_name}`));
+        if (target.emby_note) host.append(el('small', 'target-note', `备注：${target.emby_note}`));
+        [host, el('td', '', formatNumber(target.requests)), el('td', '', formatBytes(target.bytes_out)),
           el('td', '', formatNumber(target.errors)), el('td', '', `${target.avg_latency_ms} ms`)].forEach((cell) => row.append(cell));
         fragment.append(row);
       });
@@ -1330,7 +1349,7 @@
 
   function renderPolicy(policy) {
     state.policy = policy;
-    renderDevicePolicy(policy.device_policy || { mode: 'off', rules: [] });
+    renderPlayerPolicy(policy.player_policy || { mode: 'off', rules: [] });
     if (state.snapshot) renderCompactRequests(state.snapshot.recent);
     const mode = ['blacklist', 'whitelist'].includes(policy.mode) ? policy.mode : 'off';
     document.querySelectorAll('input[name="policy-mode"]').forEach((input) => { input.checked = input.value === mode; });
@@ -1428,74 +1447,40 @@
     if (state.snapshot) renderCompactTargets(state.snapshot.targets);
   }
 
-  function renderDevicePolicy(policy) {
+  function renderPlayerPolicy(policy) {
     const mode = ['blacklist', 'whitelist'].includes(policy.mode) ? policy.mode : 'off';
     const rules = policy.rules || [];
-    const playerRules = Array.isArray(policy.player_rules) ? policy.player_rules : [];
-    renderPlayerRules(playerRules);
     const label = mode === 'blacklist' ? '黑名单' : mode === 'whitelist' ? '白名单' : '关闭';
-    document.querySelectorAll('input[name="device-policy-mode"]').forEach((input) => { input.checked = input.value === mode; });
-    document.getElementById('device-policy-summary').textContent = mode === 'blacklist' ?
-      `黑名单 · ${formatNumber(rules.length)} 台设备` :
-      mode === 'whitelist' ? `白名单 · 仅登记设备可访问 · ${formatNumber(rules.length)} 台设备` : '关闭 · 全部设备放行';
-    const idInput = document.getElementById('device-id');
-    const nameInput = document.getElementById('device-name');
-    const clientInput = document.getElementById('device-client');
-    const addButton = document.getElementById('device-rule-add');
-    [idInput, nameInput, clientInput].forEach((input) => { input.disabled = mode === 'off'; });
+    const summary = mode === 'blacklist' ? `名单内播放器禁止访问 · ${formatNumber(rules.length)} 个播放器` :
+      mode === 'whitelist' ? `仅名单内播放器可以访问 · ${formatNumber(rules.length)} 个播放器` : '关闭 · 所有播放器均可访问';
+    document.querySelectorAll('input[name="player-policy-mode"]').forEach((input) => { input.checked = input.value === mode; });
+    document.getElementById('player-policy-summary').textContent = summary;
+    document.getElementById('player-policy-mode').setAttribute('aria-label', `${label}播放器访问模式`);
+    document.getElementById('player-rule-list-title').textContent = mode === 'off' ? '播放器名单' : label;
+    const nameInput = document.getElementById('player-name');
+    const noteInput = document.getElementById('player-note');
+    const addButton = document.getElementById('player-rule-add');
+    [nameInput, noteInput].forEach((input) => { input.disabled = mode === 'off'; });
     addButton.disabled = mode === 'off';
     addButton.querySelector('span').textContent = mode === 'blacklist' ? '加入黑名单' : mode === 'whitelist' ? '加入白名单' : '选择模式后添加';
-    const body = document.getElementById('device-rules-table');
-    const empty = document.getElementById('device-rules-empty');
-    document.getElementById('device-policy-mode').setAttribute('aria-label', `${label}设备访问模式`);
-    if (!rules.length) {
-      body.replaceChildren();
-      empty.textContent = mode === 'off' ? '选择黑名单或白名单模式后管理设备' : `${label}中暂无设备`;
-      empty.hidden = false;
-      return;
-    }
-    empty.hidden = true;
-    const fragment = document.createDocumentFragment();
-    rules.forEach((rule) => {
-      const row = document.createElement('tr');
-      const name = el('td', 'device-rule-name', rule.device_name || '未命名设备');
-      const client = el('td', '', rule.client_name || '—');
-      const id = el('td', 'device-id-cell', rule.device_id);
-      id.title = rule.device_id;
-      const created = el('td', '', formatTime(rule.created_at));
-      const actions = el('td', 'rule-actions');
-      const remove = el('button', 'icon-button danger-icon');
-      remove.type = 'button';
-      remove.title = '删除设备规则';
-      remove.setAttribute('aria-label', `删除 ${rule.device_name || rule.device_id}`);
-      remove.innerHTML = '<i data-lucide="trash-2"></i>';
-      remove.addEventListener('click', () => deleteDeviceRule(rule));
-      actions.append(remove);
-      row.append(name, client, id, created, actions);
-      fragment.append(row);
-    });
-    body.replaceChildren(fragment);
-    window.lucide?.createIcons();
-  }
-
-  function renderPlayerRules(playerRules) {
-    document.getElementById('player-rule-count').textContent = `${formatNumber(playerRules.length)} 个播放器`;
+    document.getElementById('player-rule-count').textContent = `${formatNumber(rules.length)} 个播放器`;
     const playerBody = document.getElementById('player-rules-table');
     const playerEmpty = document.getElementById('player-rules-empty');
-    if (!playerRules.length) {
+    if (!rules.length) {
       playerBody.replaceChildren();
+      playerEmpty.textContent = mode === 'off' ? '选择黑名单或白名单模式后管理播放器' : `${label}中暂无播放器`;
       playerEmpty.hidden = false;
       return;
     }
     playerEmpty.hidden = true;
     const playerFragment = document.createDocumentFragment();
-    playerRules.forEach((rule) => {
+    rules.forEach((rule) => {
       const row = document.createElement('tr');
       const actions = el('td', 'rule-actions');
       const remove = el('button', 'icon-button danger-icon');
       remove.type = 'button';
-      remove.title = '解除播放器禁用';
-      remove.setAttribute('aria-label', `解除 ${rule.player_name} 的禁用`);
+      remove.title = '删除播放器规则';
+      remove.setAttribute('aria-label', `删除 ${rule.player_name} 的${label}规则`);
       remove.innerHTML = '<i data-lucide="trash-2"></i>';
       remove.addEventListener('click', () => deletePlayerRule(rule));
       actions.append(remove);
@@ -1506,34 +1491,19 @@
     window.lucide?.createIcons();
   }
 
-  async function deleteDeviceRule(rule) {
+  async function deletePlayerRule(rule) {
     const confirmed = await confirmAction({
-      title: '删除设备规则',
-      message: `删除 ${rule.device_name || rule.device_id} 后，该设备将按当前模式的默认策略处理。`,
+      title: '删除播放器规则',
+      message: `删除“${rule.player_name}”后，该播放器将按当前模式的默认策略处理。`,
       confirmLabel: '确认删除', icon: 'trash-2', danger: true
     });
     if (!confirmed) return;
     try {
-      const devicePolicy = await api(`/_admin/api/device-rules/${rule.id}`, { method: 'DELETE' });
-      state.policy.device_policy = devicePolicy;
-      renderDevicePolicy(devicePolicy);
-      toast('设备规则已删除');
-    } catch (failure) { toast('设备规则删除失败'); }
-  }
-
-  async function deletePlayerRule(rule) {
-    const confirmed = await confirmAction({
-      title: '解除播放器禁用',
-      message: `解除“${rule.player_name}”后，该客户端将恢复访问。`,
-      confirmLabel: '确认解除', icon: 'ban', danger: true
-    });
-    if (!confirmed) return;
-    try {
-      const devicePolicy = await api(`/_admin/api/player-rules/${rule.id}`, { method: 'DELETE' });
-      state.policy.device_policy = devicePolicy;
-      renderDevicePolicy(devicePolicy);
-      toast('播放器禁用已解除');
-    } catch (failure) { toast('播放器禁用解除失败'); }
+      const playerPolicy = await api(`/_admin/api/player-rules/${rule.id}`, { method: 'DELETE' });
+      state.policy.player_policy = playerPolicy;
+      renderPlayerPolicy(playerPolicy);
+      toast('播放器规则已删除');
+    } catch (failure) { toast('播放器规则删除失败'); }
   }
 
   function openQuotaDialog(rule) {
@@ -2385,56 +2355,39 @@
         toast('规则模式更新失败');
       }
     }));
-    document.querySelectorAll('input[name="device-policy-mode"]').forEach((input) => input.addEventListener('change', async (event) => {
+    document.querySelectorAll('input[name="player-policy-mode"]').forEach((input) => input.addEventListener('change', async (event) => {
       if (!event.currentTarget.checked) return;
-      const previousMode = state.policy?.device_policy?.mode || 'off';
+      const previousMode = state.policy?.player_policy?.mode || 'off';
       const mode = event.currentTarget.value;
       try {
-        const devicePolicy = await api('/_admin/api/device-policy', jsonOptions('PUT', { mode }));
-        state.policy.device_policy = devicePolicy;
-        renderDevicePolicy(devicePolicy);
-        toast(mode === 'blacklist' ? '已切换到设备黑名单模式' : mode === 'whitelist' ? '已切换到设备白名单模式' : '设备策略已关闭');
+        const playerPolicy = await api('/_admin/api/player-policy', jsonOptions('PUT', { mode }));
+        state.policy.player_policy = playerPolicy;
+        renderPlayerPolicy(playerPolicy);
+        if (state.snapshot) renderCompactRequests(state.snapshot.recent);
+        toast(mode === 'blacklist' ? '已切换到播放器黑名单模式' : mode === 'whitelist' ? '已切换到播放器白名单模式' : '播放器策略已关闭');
       } catch (failure) {
-        document.querySelector(`input[name="device-policy-mode"][value="${previousMode}"]`).checked = true;
-        toast('设备策略模式更新失败');
+        document.querySelector(`input[name="player-policy-mode"][value="${previousMode}"]`).checked = true;
+        toast('播放器策略模式更新失败');
       }
     }));
-    document.getElementById('device-rule-form').addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const form = event.currentTarget;
-      const error = document.getElementById('device-rule-error');
-      error.hidden = true;
-      try {
-        const devicePolicy = await api('/_admin/api/device-rules', jsonOptions('POST', {
-          device_id: document.getElementById('device-id').value.trim(),
-          device_name: document.getElementById('device-name').value.trim(),
-          client_name: document.getElementById('device-client').value.trim()
-        }));
-        state.policy.device_policy = devicePolicy;
-        renderDevicePolicy(devicePolicy);
-        form.reset();
-        toast(state.policy.device_policy.mode === 'blacklist' ? '设备已加入黑名单' : '设备已加入白名单');
-      } catch (failure) {
-        error.textContent = failure.message === 'select blacklist or whitelist mode first' ? '请先选择黑名单或白名单模式' : '设备规则保存失败，请检查设备 ID';
-        error.hidden = false;
-      }
-    });
     document.getElementById('player-rule-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const form = event.currentTarget;
       const error = document.getElementById('player-rule-error');
       error.hidden = true;
       try {
-        const devicePolicy = await api('/_admin/api/player-rules', jsonOptions('POST', {
+        const playerPolicy = await api('/_admin/api/player-rules', jsonOptions('POST', {
           player_name: document.getElementById('player-name').value.trim(),
           note: document.getElementById('player-note').value.trim()
         }));
-        state.policy.device_policy = devicePolicy;
-        renderDevicePolicy(devicePolicy);
+        state.policy.player_policy = playerPolicy;
+        renderPlayerPolicy(playerPolicy);
         form.reset();
-        toast('播放器已禁用');
+        if (state.snapshot) renderCompactRequests(state.snapshot.recent);
+        toast(state.policy.player_policy.mode === 'blacklist' ? '播放器已加入黑名单' : '播放器已加入白名单');
       } catch (failure) {
-        error.textContent = failure.message === 'invalid player name' ? '请输入有效的播放器名称' : '播放器禁用保存失败，请检查输入';
+        error.textContent = failure.message === 'invalid player name' ? '请输入有效的播放器名称' :
+          failure.message === 'select blacklist or whitelist mode first' ? '请先选择播放器黑名单或白名单模式' : '播放器规则保存失败，请检查输入';
         error.hidden = false;
       }
     });

@@ -6,11 +6,11 @@
   <meta name="robots" content="noindex,nofollow">
   <title>Refract</title>
   <link rel="icon" href="/_gateway/avatar">
-  <link rel="stylesheet" href="/_admin/assets/app.css?v=1.17.0-20261019-panel-policy-1">
+  <link rel="stylesheet" href="/_admin/assets/app.css?v=1.18.0-20261019-player-policy-1">
   <script defer src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"></script>
   <script defer src="/_admin/assets/lucide.min.js"></script>
   <script defer src="/_admin/assets/echarts.min.js"></script>
-  <script defer src="/_admin/assets/panel.js?v=1.17.0-20261019-panel-policy-1"></script>
+  <script defer src="/_admin/assets/panel.js?v=1.18.0-20261019-player-policy-1"></script>
 </head>
 <body class="panel-page">
   <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -60,7 +60,7 @@
         <button id="update-button" class="sidebar-update" type="button" disabled title="正在检查更新" aria-label="Refract 版本信息">
           <span class="sidebar-update-copy">
             <strong>Refract</strong>
-            <span class="sidebar-version-row"><span id="current-version">Version 1.17.0</span><i id="update-dot" class="update-dot" hidden></i></span>
+            <span class="sidebar-version-row"><span id="current-version">Version 1.18.0</span><i id="update-dot" class="update-dot" hidden></i></span>
           </span>
           <i id="update-icon" class="sidebar-update-icon" data-lucide="circle-arrow-up" aria-hidden="true"></i>
         </button>
@@ -295,38 +295,24 @@
             </form>
             <p id="rule-error" class="form-error inline-error" role="alert" hidden></p>
           </section>
-          <section class="data-section device-policy-section">
+          <section class="data-section player-policy-section">
             <div class="section-heading">
-              <div><h2>播放器设备策略</h2><p id="device-policy-summary">关闭 · 全部设备放行</p></div>
-              <fieldset id="device-policy-mode" class="policy-mode">
-                <legend class="sr-only">选择设备访问模式</legend>
-                <label><input type="radio" name="device-policy-mode" value="off"><span>关闭</span></label>
-                <label><input type="radio" name="device-policy-mode" value="blacklist"><span>黑名单</span></label>
-                <label><input type="radio" name="device-policy-mode" value="whitelist"><span>白名单</span></label>
+              <div><h2>禁用播放器</h2><p id="player-policy-summary">关闭 · 所有播放器均可访问</p></div>
+              <fieldset id="player-policy-mode" class="policy-mode">
+                <legend class="sr-only">选择播放器访问模式</legend>
+                <label><input type="radio" name="player-policy-mode" value="off"><span>关闭</span></label>
+                <label><input type="radio" name="player-policy-mode" value="blacklist"><span>黑名单</span></label>
+                <label><input type="radio" name="player-policy-mode" value="whitelist"><span>白名单</span></label>
               </fieldset>
             </div>
-            <form id="device-rule-form" class="device-rule-form">
-              <div><label for="device-id">设备 ID</label><input id="device-id" type="text" maxlength="256" autocomplete="off" required></div>
-              <div><label for="device-name">设备名称</label><input id="device-name" type="text" maxlength="128" autocomplete="off" placeholder="可选"></div>
-              <div><label for="device-client">客户端名称</label><input id="device-client" type="text" maxlength="128" autocomplete="off" placeholder="可选"></div>
-              <button id="device-rule-add" class="primary-button compact" type="submit"><i data-lucide="plus"></i><span>选择模式后添加</span></button>
-            </form>
-            <p id="device-rule-error" class="form-error inline-error" role="alert" hidden></p>
-            <div class="table-scroll">
-              <table>
-                <thead><tr><th>设备</th><th>客户端</th><th>设备 ID</th><th>创建时间</th><th aria-label="操作"></th></tr></thead>
-                <tbody id="device-rules-table"></tbody>
-              </table>
-            </div>
-            <p id="device-rules-empty" class="empty-state">选择黑名单或白名单模式后管理设备</p>
-            <div class="device-player-heading section-heading">
-              <div><h3>禁用播放器</h3><p>按 Emby 客户端名称匹配，独立于设备黑白名单</p></div>
+            <div class="player-policy-heading section-heading">
+              <div><h3 id="player-rule-list-title">播放器名单</h3><p>按 Emby 客户端名称匹配，不区分大小写</p></div>
               <span id="player-rule-count" class="quiet-label">0 个播放器</span>
             </div>
             <form id="player-rule-form" class="player-rule-form">
               <div><label for="player-name">播放器名称</label><input id="player-name" type="text" maxlength="128" autocomplete="off" required placeholder="例如：Infuse"></div>
               <div><label for="player-note">备注</label><input id="player-note" type="text" maxlength="512" autocomplete="off" placeholder="例如：临时禁用旧版客户端"></div>
-              <button id="player-rule-add" class="primary-button compact" type="submit"><i data-lucide="ban"></i><span>禁用播放器</span></button>
+              <button id="player-rule-add" class="primary-button compact" type="submit"><i data-lucide="plus"></i><span>选择模式后添加</span></button>
             </form>
             <p id="player-rule-error" class="form-error inline-error" role="alert" hidden></p>
             <div class="table-scroll">

@@ -59,6 +59,9 @@ func (a *adminServer) handleReports(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, http.StatusInternalServerError, "report unavailable")
 		return
 	}
+	if servers, healthErr := a.store.EmbyHealthTargetLabels(r.Context()); healthErr == nil {
+		decorateTargetSummaries(report.TopTargets, servers)
+	}
 	a.writeJSON(w, http.StatusOK, report)
 }
 

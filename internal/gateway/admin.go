@@ -180,8 +180,8 @@ func (a *adminServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 		a.handleDomainRule(w, r)
 		return
 	}
-	if path == "/_admin/api/device-policy" {
-		a.handleDevicePolicy(w, r)
+	if path == "/_admin/api/player-policy" || path == "/_admin/api/device-policy" {
+		a.handlePlayerPolicy(w, r)
 		return
 	}
 	if path == "/_admin/api/emby-health" {
@@ -192,20 +192,12 @@ func (a *adminServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 		a.handleEmbyHealthServerItem(w, r)
 		return
 	}
-	if path == "/_admin/api/device-rules" {
-		a.handleDeviceRules(w, r)
-		return
-	}
 	if path == "/_admin/api/player-rules" {
 		a.handlePlayerRules(w, r)
 		return
 	}
 	if strings.HasPrefix(path, "/_admin/api/player-rules/") {
 		a.handlePlayerRuleDelete(w, r)
-		return
-	}
-	if strings.HasPrefix(path, "/_admin/api/device-rules/") {
-		a.handleDeviceRuleDelete(w, r)
 		return
 	}
 	if strings.HasPrefix(path, "/_admin/api/connections/") {
@@ -253,6 +245,10 @@ func (a *adminServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			a.writeError(w, http.StatusInternalServerError, "dashboard unavailable")
 			return
+		}
+		if servers, healthErr := a.store.EmbyHealthTargetLabels(r.Context()); healthErr == nil {
+			decorateTargetSummaries(snapshot.Targets, servers)
+			decorateRequestLogs(snapshot.Recent, servers)
 		}
 		a.writeJSON(w, http.StatusOK, snapshot)
 	case "/_admin/api/live":
@@ -333,6 +329,9 @@ func (a *adminServer) handleAPI(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			a.writeError(w, http.StatusInternalServerError, "request logs unavailable")
 			return
+		}
+		if servers, healthErr := a.store.EmbyHealthTargetLabels(r.Context()); healthErr == nil {
+			decorateRequestLogs(result.Logs, servers)
 		}
 		a.writeJSON(w, http.StatusOK, map[string]any{
 			"logs": result.Logs, "statuses": result.Statuses, "total": result.Total,
@@ -630,10 +629,10 @@ func (a *adminServer) handlePolicySchedule(w http.ResponseWriter, r *http.Reques
 	a.writeJSON(w, http.StatusOK, a.gateway.policy.Load())
 }
 
-func (a *adminServer) handleDevicePolicy(w http.ResponseWriter, r *http.Request) {
+func (a *adminServer) handlePlayerPolicy(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		a.writeJSON(w, http.StatusOK, a.gateway.policy.Load().DevicePolicy)
+		a.writeJSON(w, http.StatusOK, a.gateway.policy.Load().PlayerPolicy)
 	case http.MethodPut:
 		if !sameOriginRequest(r) {
 			a.writeError(w, http.StatusForbidden, "same-origin request required")
@@ -643,86 +642,20 @@ func (a *adminServer) handleDevicePolicy(w http.ResponseWriter, r *http.Request)
 			Mode string `json:"mode"`
 		}
 		if err := decodeAdminJSON(w, r, &payload); err != nil || !validProxyMode(payload.Mode) {
-			a.writeError(w, http.StatusBadRequest, "invalid device policy mode")
+			a.writeError(w, http.StatusBadRequest, "invalid player policy mode")
 			return
 		}
-		if err := a.store.SetProxyDevicePolicyMode(r.Context(), payload.Mode); err != nil || a.gateway.reloadProxyPolicy(r.Context()) != nil {
-			a.writeError(w, http.StatusInternalServerError, "device policy update failed")
+		if err := a.store.SetProxyPlayerPolicyMode(r.Context(), payload.Mode); err != nil || a.gateway.reloadProxyPolicy(r.Context()) != nil {
+			a.writeError(w, http.StatusInternalServerError, "player policy update failed")
 			return
 		}
 		currentPolicy := a.gateway.policy.Load()
-		disconnected := a.gateway.connections.CancelDisallowedDevices(&currentPolicy.DevicePolicy)
-		a.auditRequest(r, "policy.device.mode", payload.Mode, fmt.Sprintf("disconnected=%d", disconnected), true)
-		a.writeJSON(w, http.StatusOK, a.gateway.policy.Load().DevicePolicy)
+		disconnected := a.gateway.connections.CancelDisallowedPlayers(&currentPolicy.PlayerPolicy)
+		a.auditRequest(r, "policy.player.mode", payload.Mode, fmt.Sprintf("disconnected=%d", disconnected), true)
+		a.writeJSON(w, http.StatusOK, a.gateway.policy.Load().PlayerPolicy)
 	default:
 		a.methodNotAllowed(w, http.MethodGet+", "+http.MethodPut)
 	}
-}
-
-func (a *adminServer) handleDeviceRules(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		a.methodNotAllowed(w, http.MethodPost)
-		return
-	}
-	if !sameOriginRequest(r) {
-		a.writeError(w, http.StatusForbidden, "same-origin request required")
-		return
-	}
-	var payload struct {
-		DeviceID   string `json:"device_id"`
-		DeviceName string `json:"device_name"`
-		ClientName string `json:"client_name"`
-	}
-	if err := decodeAdminJSON(w, r, &payload); err != nil {
-		a.writeError(w, http.StatusBadRequest, "invalid device rule request")
-		return
-	}
-	if a.gateway.policy.Load().DevicePolicy.Mode == proxyModeOff {
-		a.writeError(w, http.StatusConflict, "select blacklist or whitelist mode first")
-		return
-	}
-	rule, err := normalizeDeviceRule(payload.DeviceID, payload.DeviceName, payload.ClientName)
-	if err != nil {
-		a.writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	if _, err := a.store.UpsertProxyDeviceRule(r.Context(), rule); err != nil || a.gateway.reloadProxyPolicy(r.Context()) != nil {
-		a.writeError(w, http.StatusInternalServerError, "device rule creation failed")
-		return
-	}
-	currentPolicy := a.gateway.policy.Load()
-	disconnected := a.gateway.connections.CancelDisallowedDevices(&currentPolicy.DevicePolicy)
-	a.auditRequest(r, "policy.device.rule.create", rule.DeviceID, fmt.Sprintf("device=%s client=%s disconnected=%d", rule.DeviceName, rule.ClientName, disconnected), true)
-	a.writeJSON(w, http.StatusCreated, a.gateway.policy.Load().DevicePolicy)
-}
-
-func (a *adminServer) handleDeviceRuleDelete(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		a.methodNotAllowed(w, http.MethodDelete)
-		return
-	}
-	if !sameOriginRequest(r) {
-		a.writeError(w, http.StatusForbidden, "same-origin request required")
-		return
-	}
-	rawID := strings.TrimPrefix(r.URL.Path, "/_admin/api/device-rules/")
-	id, err := strconv.ParseInt(rawID, 10, 64)
-	if err != nil || id < 1 || strings.Contains(rawID, "/") {
-		a.writeError(w, http.StatusBadRequest, "invalid device rule id")
-		return
-	}
-	if err := a.store.DeleteProxyDeviceRule(r.Context(), id); err != nil {
-		a.writeError(w, http.StatusNotFound, "device rule not found")
-		return
-	}
-	if err := a.gateway.reloadProxyPolicy(r.Context()); err != nil {
-		a.writeError(w, http.StatusInternalServerError, "device rule update failed")
-		return
-	}
-	currentPolicy := a.gateway.policy.Load()
-	disconnected := a.gateway.connections.CancelDisallowedDevices(&currentPolicy.DevicePolicy)
-	a.auditRequest(r, "policy.device.rule.delete", rawID, fmt.Sprintf("disconnected=%d", disconnected), true)
-	a.writeJSON(w, http.StatusOK, a.gateway.policy.Load().DevicePolicy)
 }
 
 func (a *adminServer) handlePlayerRules(w http.ResponseWriter, r *http.Request) {
@@ -747,14 +680,18 @@ func (a *adminServer) handlePlayerRules(w http.ResponseWriter, r *http.Request) 
 		a.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if a.gateway.policy.Load().PlayerPolicy.Mode == proxyModeOff {
+		a.writeError(w, http.StatusConflict, "select blacklist or whitelist mode first")
+		return
+	}
 	if _, err := a.store.UpsertProxyPlayerRule(r.Context(), rule); err != nil || a.gateway.reloadProxyPolicy(r.Context()) != nil {
 		a.writeError(w, http.StatusInternalServerError, "player rule creation failed")
 		return
 	}
 	currentPolicy := a.gateway.policy.Load()
-	disconnected := a.gateway.connections.CancelDisallowedDevices(&currentPolicy.DevicePolicy)
+	disconnected := a.gateway.connections.CancelDisallowedPlayers(&currentPolicy.PlayerPolicy)
 	a.auditRequest(r, "policy.player.rule.create", rule.PlayerName, fmt.Sprintf("note=%s disconnected=%d", rule.Note, disconnected), true)
-	a.writeJSON(w, http.StatusCreated, a.gateway.policy.Load().DevicePolicy)
+	a.writeJSON(w, http.StatusCreated, a.gateway.policy.Load().PlayerPolicy)
 }
 
 func (a *adminServer) handlePlayerRuleDelete(w http.ResponseWriter, r *http.Request) {
@@ -781,9 +718,9 @@ func (a *adminServer) handlePlayerRuleDelete(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	currentPolicy := a.gateway.policy.Load()
-	disconnected := a.gateway.connections.CancelDisallowedDevices(&currentPolicy.DevicePolicy)
+	disconnected := a.gateway.connections.CancelDisallowedPlayers(&currentPolicy.PlayerPolicy)
 	a.auditRequest(r, "policy.player.rule.delete", rawID, fmt.Sprintf("disconnected=%d", disconnected), true)
-	a.writeJSON(w, http.StatusOK, a.gateway.policy.Load().DevicePolicy)
+	a.writeJSON(w, http.StatusOK, a.gateway.policy.Load().PlayerPolicy)
 }
 
 func (a *adminServer) handleRules(w http.ResponseWriter, r *http.Request) {

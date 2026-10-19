@@ -265,6 +265,25 @@ func (s *telemetryStore) EmbyHealthServers(ctx context.Context, includeDisabled 
 	return servers, rows.Err()
 }
 
+func (s *telemetryStore) EmbyHealthTargetLabels(ctx context.Context) ([]embyHealthServer, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT group_name,name,line_name,note,base_url FROM monitored_emby_servers WHERE enabled=1 ORDER BY group_name COLLATE NOCASE,name COLLATE NOCASE,id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	servers := make([]embyHealthServer, 0)
+	for rows.Next() {
+		var server embyHealthServer
+		if err := rows.Scan(&server.GroupName, &server.Name, &server.LineName, &server.Note, &server.BaseURL); err != nil {
+			return nil, err
+		}
+		server.Enabled = true
+		servers = append(servers, server)
+	}
+	return servers, rows.Err()
+}
+
 func (s *telemetryStore) RecordEmbyHealthCheck(ctx context.Context, serverID, configVersion int64, sample embyHealthSample) error {
 	result, err := s.db.ExecContext(ctx,
 		`INSERT INTO emby_health_checks(server_id,checked_at,success,latency_ms,status_code)

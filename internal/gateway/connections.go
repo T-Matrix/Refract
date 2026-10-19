@@ -144,14 +144,14 @@ func (t *connectionTracker) StartForIdentity(cancel context.CancelFunc, clientIP
 	return flow
 }
 
-func (t *connectionTracker) CancelDisallowedDevices(policy *devicePolicy) int {
+func (t *connectionTracker) CancelDisallowedPlayers(policy *playerPolicy) int {
 	if t == nil || policy == nil {
 		return 0
 	}
 	t.mu.RLock()
 	cancels := make([]context.CancelFunc, 0)
 	for _, flow := range t.items {
-		if !policy.AllowsIdentity(flow.deviceID, flow.clientName) {
+		if !policy.AllowsClient(flow.clientName) {
 			cancels = append(cancels, flow.cancel)
 		}
 	}

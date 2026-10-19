@@ -44,6 +44,47 @@ func TestNormalizeEmbyHealthServer(t *testing.T) {
 	}
 }
 
+func TestMatchEmbyHealthLabelByHostAndPort(t *testing.T) {
+	servers := []embyHealthServer{
+		{GroupName: "华东", Name: "主力节点", LineName: "电信主线", Note: "晚高峰观察", BaseURL: "https://media.example.com:8920/emby", Enabled: true},
+		{GroupName: "华东", Name: "默认节点", LineName: "443 线路", BaseURL: "https://media.example.com", Enabled: true},
+		{GroupName: "备用", Name: "停用节点", BaseURL: "https://disabled.example.com:8920", Enabled: false},
+	}
+	labels := buildEmbyHealthLabels(servers)
+
+	matched := matchEmbyHealthLabel("media.example.com:8920", "", labels)
+	if matched == nil || matched.serverName != "主力节点" || matched.lineName != "电信主线" || matched.note != "晚高峰观察" {
+		t.Fatalf("non-default port label=%#v", matched)
+	}
+	matched = matchEmbyHealthLabel("media.example.com", "https", labels)
+	if matched == nil || matched.serverName != "默认节点" {
+		t.Fatalf("default https label=%#v", matched)
+	}
+	if matchEmbyHealthLabel("media.example.com:8096", "", labels) != nil {
+		t.Fatal("different port unexpectedly matched")
+	}
+	if matchEmbyHealthLabel("disabled.example.com:8920", "", labels) != nil {
+		t.Fatal("disabled server unexpectedly matched")
+	}
+}
+
+func TestDecorateTelemetryWithEmbyHealthLabels(t *testing.T) {
+	servers := []embyHealthServer{{GroupName: "华东", Name: "主力节点", LineName: "电信", Note: "晚高峰", BaseURL: "https://media.example.com:8920", Enabled: true}}
+	targets := []targetSummary{{Host: "media.example.com:8920"}, {Host: "other.example.com:443"}}
+	decorateTargetSummaries(targets, servers)
+	if targets[0].EmbyServerName != "主力节点" || targets[0].EmbyLineName != "电信" || targets[0].EmbyNote != "晚高峰" {
+		t.Fatalf("target labels=%#v", targets[0])
+	}
+	if targets[1].EmbyServerName != "" {
+		t.Fatalf("unmatched target labels=%#v", targets[1])
+	}
+	logs := []requestLog{{Host: "media.example.com:8920", Scheme: "https"}}
+	decorateRequestLogs(logs, servers)
+	if logs[0].EmbyServerName != "主力节点" || logs[0].EmbyGroupName != "华东" {
+		t.Fatalf("request labels=%#v", logs[0])
+	}
+}
+
 func TestEmbyHealthAvailabilityAndPublicRedaction(t *testing.T) {
 	gateway := newAdminTestGateway(t)
 	ctx := context.Background()
