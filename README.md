@@ -1,56 +1,82 @@
 # Refract
 
 [![CI](https://github.com/T-Matrix/Refract/actions/workflows/ci.yml/badge.svg)](https://github.com/T-Matrix/Refract/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/T-Matrix/Refract)](https://github.com/T-Matrix/Refract/releases)
+[![Release](https://img.shields.io/github/v/release/T-Matrix/Refract?label=stable)](https://github.com/T-Matrix/Refract/releases)
+[![Beta Pre-release](https://img.shields.io/github/v/release/T-Matrix/Refract?include_prereleases&label=beta&color=orange)](https://github.com/T-Matrix/Refract/releases/tag/v2.0.0-beta.1)
 [![License](https://img.shields.io/github/license/T-Matrix/Refract)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)](go.mod)
 
-Refract 是运行在 VPS 上的通用 URL 反向代理与 Emby/Jellyfin 流媒体网关。它将完整原始地址放在代理域名之后，并自动处理重定向、HLS、Range、WebSocket 和多后端推流。
+Refract 是面向 Emby / Jellyfin 流媒体与通用 HTTP(S) 源站的反向代理与边缘调度网关，单二进制零运行时依赖，提供完整的中文管理控制台。它不仅支持 `proxy.example.com/https://origin.example.com/...` 形态的无预设 URL 折射代理（自动处理 302、HLS、Range、WebSocket 与推流 HMAC 签名），在 **v2.0** 中更演进为支持 **Controller / Edge Agent 分布式集群、AutoTLS 自动证书、智能 DNS 多线调度、可视化流图 WAF、实时观影审计与节点主网卡计费** 的完整反代网关平台。
 
-```text
-https://proxy.example.com/https://origin.example.com/path?x=1
-https://proxy.example.com/http://origin.example.com:8096/path
-```
-
-它同时提供完整的中文管理面板，用于实时流量、连接、地域、访问规则、通知、审计和备份管理。
-
-直接访问部署域名的根路径会显示 Refract 公共展示页。页面动态读取部署配置中的公开入口地址，访客可以复制代理示例，管理员可从右上角进入 `/login`。
+> [!NOTE]
+> **`v2.0.0-beta.1` 为 Beta 尝鲜预发布版本**：GitHub 右侧 Releases 栏默认展示正式版 Latest（`v1.18.0`），预发布版可在 [Releases 页面](https://github.com/T-Matrix/Refract/releases) 查看或下载。v1.x 用户可直接升级，`gateway.db` 与现有配置会在启动时自动平滑迁移，无需重建数据库。
 
 ![Refract 管理面板](screenshots/refract-openflare-desktop.png)
 
+## 部署架构
+
+Refract 支持两种运行模式，共用同一套 Go 二进制与兼容的 SQLite 数据Schema：
+
+| 模式 (`REFRACT_ROLE`) | 适用场景 | 职责说明 |
+| --- | --- | --- |
+| **`standalone`**（默认） | 单台 VPS 部署 | 同时提供 HTTPS/反代入口、管理控制台 `/panel` 与全套数据持久化 |
+| **`controller` + `agent`** | 多台边缘 VPS 集群调度 | **Controller** 专注管理面板、证书签发、DNS 调度与统计审计；**Edge Agent** 承载真实反代流量并毫秒级 SSE 热同步配置，支持断网 Fail-Open 本地续航 |
+
+```text
+  播放器 / 客户端 (SenPlayer · Infuse · VidHub · Hills · 浏览器)
+         │
+         ▼  Cloudflare / AxisNow 智能分流 · Auto-TLS / DNS-01
+  ┌──────────────────────────────────────────────────────┐
+  │  Edge Agent 边缘节点群 (承载实际媒体流 & DAG WAF 防护)  │
+  └──────┬───────────────────────────────────────────▲───┘
+         │ 心跳 / 实时流快照 / 网卡字节 / 审计遥测      │ SSE 毫秒级配置 & 证书热推送
+         ▼                                           │
+  ┌──────────────────────────────────────────────────┴───┐
+  │  Controller 集群主控 (管理面板 / DNS 调度 / 观影历史)  │
+  └──────────────────────────────────────────────────────┘
+```
+
 ## 核心能力
 
-- 通用 HTTP/HTTPS 代理，保留任意方法、请求体和原始查询参数顺序。
-- 根路径公共展示页、实时服务状态和基于部署入口地址生成的一键复制示例。
-- WebSocket、Range / If-Range 和流式响应透传。
-- 自动改写 `Location`、`Content-Location`、`Refresh`、Emby JSON 和 HLS 播放列表 URL。
-- 自动发现的推流域名由服务端签名，无需逐个手工添加 CDN 域名。
-- DNS 固定与 SSRF 防护，默认阻止私网、回环、链路本地和保留地址。
-- 每秒实时上传/下载、当前连接、后端排行和脱敏请求日志。
-- 可缩放世界请求地图：中国大陆精确到省份，其他地区按国家聚合。
-- 按客户端 IP 聚合并发下载，记录实际每秒峰值速度。
-- 可配置单客户端 IP 聚合下行限速，同一 IP 多开连接仍共享一个速度上限。
-- 24 小时、7 天、30 天、90 天统计与 CSV 导出；后端和客户端流量来自同一次原子计量。
-- 可关闭的域名黑名单 / 白名单模式，规则只匹配域名及子域名；可设置每日开放时段。
-- 白名单域名可选累计单向下行额度，并显示已用、剩余和达限状态；HTTP、并发流与 WebSocket 共用额度。
-- Telegram 日报、Cloudflare Turnstile、管理审计与 SQLite 备份恢复。
-- 可上传自定义站点头像，并同步到公共首页、登录页、安装页和管理面板；头像随 SQLite 备份保留。
-- 面板结构化管理常用运行参数，保存前校验并保留上一份可用配置；敏感密钥不向网页返回。
-- 侧栏可查看当前与最新版本的 Release 更新日志；新版本显示红点，原生 systemd 部署可在面板校验、更新并失败回滚。
-- Docker Compose + Caddy 自动申请和续期 HTTPS 证书。
+### 通用反代与流媒体引擎
+- 完整 HTTP/HTTPS 代理，保留原始方法、请求体与查询参数顺序，原生透传 Range / If-Range 与 WebSocket。
+- 自动改写 `Location`、`Content-Location`、`Refresh`、Emby JSON 与 HLS `.m3u8` 播放列表地址。
+- 自动发现的外部 CDN 推流地址由服务端 HMAC 短期签名并强制执行 DNS/SSRF 安全校验。
 
-## 一键部署
+### 分布式集群与多反代域名 (`v2.0`)
+- 一条发现/接入命令即可将边缘 VPS 接入主控，主控在线下发 `amd64`/`arm64` 二进制实现集群一键批量升级。
+- 一机多域托管：按反代域名绑定节点组，支持单域名与单节点粒度覆写默认上游、并发、单 IP 限速及独立 **前置 CDN 真实 IP / 可信 CIDR** 策略。
+- Edge Agent 自动维护证书（Let's Encrypt HTTP-01 自动签发、Cloudflare DNS-01 泛域名证书自动续期、手工 PEM 上传或交由外部 CDN 终止）。
+- 边缘节点本地持久化最后一份可用配置，主控临时失联时自动 **Fail-Open** 持续服务。
 
-### 准备条件
+### 智能 DNS 调度与容灾 (`v2.0`)
+- **Cloudflare DNS**：支持多节点负载均衡解析与故障主备自动切换。
+- **AxisNow 智能分线路 DNS**：支持中国电信 / 联通 / 移动分线路优化解析、健康检查自动摘除与灰云 CNAME 无感联动。
 
-- Linux VPS，支持 `amd64` 或 `arm64`。
-- 一个已经解析到 VPS 公网 IP 的域名。
-- 防火墙放行 TCP 80、TCP 443；启用 HTTP/3 时同时放行 UDP 443。
-- 使用 root，或能够执行 `sudo` 的账号。
+### 可视化流图 WAF 与访问策略 (`v2.0`)
+- 拖拽式 DAG 节点编排防火墙规则，支持 **国家/地区 GeoIP、播放器客户端识别、IP/CIDR、URL 路径/查询正则、自定义时段、动作放行/拦截状态码**，并与全局及域名维度绑定。
+- 统一播放器黑白名单与设备黑白名单，支持从历史流量中自动识别播放器名称并一键添加规则。
+- 支持全局及单域名黑/白名单、每日开放时段（北京时间 `Asia/Shanghai`）与白名单累计下行额度控制。
 
-脚本支持 Debian、Ubuntu、RHEL、CentOS、Fedora 和 Alpine。缺少 Docker 时会通过 Docker 官方安装脚本安装 Engine 与 Compose 插件。
+### 实时观影监控与 Emby 探针 (`v2.0`)
+- **正在观看 / 播放历史**：实时识别媒体标题、剧集季集号、多版本片源自动合并、直连播放/直接串流方式、画质规格、播放器、IP 属地与实时下行速率。
+- 支持对单条活跃观影流 **一键断开并封禁重连**，立即取消底层连接并阻断同设备回连。
+- 内置 **Emby 源站探针**：周期探测源站可用率（24h/7d/30d）、延迟趋势，支持公开探针页展示与隐私主机名脱敏。
 
-先查看脚本，再执行：
+### 节点主网卡月度流量计费 (`v2.0`)
+- 自动解析 Linux `/proc/net/route`、`ipv6_route` 与 sysfs（`lower_*` 穿透 VLAN/桥接）识别物理主网卡，智能排除 `lo`、Docker 网桥、`veth`、WireGuard/TUN 等虚拟接口流量。
+- 支持按 **双向（RX+TX）/ 出站 / 入站** 统计 VPS 月度配额、80%/100% Telegram 告警、达限自动排空下线以及提高配额或跨计费周期自动恢复上线。
+
+## 一键部署与升级
+
+### 1. 准备条件
+- Linux VPS（`amd64` 或 `arm64`），使用 `root` 或 `sudo` 权限运行。
+- 已解析到 VPS 的公网域名，防火墙放行 TCP 80 / TCP 443（使用 HTTP/3 时放行 UDP 443）。
+- 支持 Debian、Ubuntu、RHEL、CentOS、Fedora 与 Alpine，脚本会自动安装 Docker Engine 与 Compose 插件（如缺失）。
+
+### 2. 全新安装
+
+**单机模式（默认）**：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/install.sh -o install-refract.sh
@@ -58,17 +84,7 @@ less install-refract.sh
 sudo sh install-refract.sh
 ```
 
-脚本会询问域名和默认上游。交互安装时默认上游可以留空，脚本会明确警告并确认启用通用反代模式；无人值守安装必须显式传入 `--public-proxy`。随后脚本会自动生成 256 位签名密钥与管理会话密钥，启动服务并等待健康检查通过。首次部署完成后访问：
-
-```text
-https://你的域名/setup
-```
-
-在安装页面创建管理员账号和密码，之后通过 `/login` 进入后台。
-
-### 非交互部署
-
-安全模式只允许配置的初始后端，自动发现的推流后端仍会通过签名放行：
+非交互指定默认上游或允许域名列表：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/install.sh \
@@ -78,17 +94,17 @@ curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/insta
       --yes
 ```
 
-多个初始后端：
+**集群主控模式 (`controller`)**：主控只承载管理面板，边缘节点部署完成后可在后台「节点管理」一键复制对应边缘机型的安装接入命令：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/install.sh \
   | sudo sh -s -- \
-      --domain proxy.example.com \
-      --allow-hosts 'emby1.example.com,emby2.example.com,*.trusted.example.com' \
+      --role controller \
+      --domain ctrl.example.com \
       --yes
 ```
 
-允许任何用户代理任意公网目标：
+**通用公网反代模式**（允许代理任意未签名公网目标）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/install.sh \
@@ -99,28 +115,35 @@ curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/insta
 ```
 
 > [!WARNING]
-> `--public-proxy` 会把服务变成公开的公网 HTTP 代理，可能被用于盗链、扫描或消耗带宽。私网目标仍然默认禁止，但公网部署应结合面板黑名单、并发限制和上游防火墙持续观察。
+> `--public-proxy` 允许任何访客通过你的网关代理任意公网目标，请配合 WAF 规则、黑白名单与单 IP 并发限速使用。
 
-### 一键更新
+部署完成后访问 `https://你的域名/setup` 初始化管理员账号。
 
-默认安装目录 `/opt/refract`：
+### 3. 从 v1.x 一键升级到 v2.0
+
+所有 v1.x 的 `.env`、SQLite 数据（`gateway.db`）、规则、管理员账号和证书都会自动保留并完成结构迁移：
+
+- **Docker Compose 部署**（拉取 `main` 最新源码并原地重建容器，含 `v2.0` 新特性）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/install.sh | sudo sh
 ```
 
-自定义安装目录：
+如部署在自定义目录（例如 `/data/refract`）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/install.sh | sudo sh -s -- --install-dir /你的安装目录
 ```
 
-脚本会执行快进更新并重建容器，现有 `.env`、SQLite 数据、面板账号和证书都会保留。
-旧版 `/opt/vps-url-gateway` systemd 部署也会被自动识别，脚本将校验最新 Release、备份当前二进制并原地更新；健康检查失败时自动回滚。
+- **原生 systemd 部署（`/opt/vps-url-gateway`）**：
+  - 升级到最新正式版（`Latest`）：直接执行 `sudo sh` 即可自动校验 SHA-256、替换并健康检查，失败自动回滚。
+  - **尝鲜升级到 `v2.0.0-beta.1`**：通过 `--version` 指定预发布标签：
 
-原生 systemd 部署升级到支持面板更新的版本后，脚本会安装一个受限的 root 维护 Socket，主服务仍以 `vps-url-gateway` 低权限账号运行。侧栏左下角会自动检查官方 GitHub Release；有新版本时版本号旁显示红点，点击版本区域并确认即可完成 SHA256 校验、原子替换、服务重启和健康检查，失败时自动恢复旧二进制。维护接口不接受任意命令、下载地址或文件路径。Docker Compose 部署不向容器挂载宿主机 Docker 控制权限，因此二进制更新仍使用上面的一键更新命令。
+```bash
+curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/install.sh | sudo sh -s -- --version v2.0.0-beta.1
+```
 
-早期 systemd 版本如果只替换过二进制，面板可能提示缺少维护服务。可运行专用修复命令；它只补装受限维护 Socket 并重启 Refract，不修改代理配置、数据库和证书：
+早期原生部署若缺少维护 Socket，可单独补装通道而不修改任何业务配置：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/T-Matrix/Refract/main/scripts/install.sh | sudo sh -s -- --repair-panel-update
@@ -137,126 +160,54 @@ cp .env.example .env
 openssl rand -hex 32
 ```
 
-编辑 `.env`，至少配置：
-
-```dotenv
-PROXY_DOMAIN=proxy.example.com
-DEFAULT_UPSTREAM=https://emby.example.com
-ALLOWED_UPSTREAMS=emby.example.com
-SIGNING_SECRET=至少32字符的随机值
-ADMIN_ENABLED=true
-ADMIN_USERNAME=admin
-ADMIN_SESSION_SECRET=至少32字符的另一个随机值
-```
-
-`ADMIN_PASSWORD_HASH` 留空时，首次访问 `/setup` 创建管理员。然后启动：
+在 `.env` 中配置 `PROXY_DOMAIN`、`SIGNING_SECRET`（≥32 字符）、`ADMIN_ENABLED=true`、`ADMIN_SESSION_SECRET`（≥32 字符）及可选的 `REFRACT_ROLE`、`DEFAULT_UPSTREAM`，然后启动：
 
 ```bash
 docker compose up -d --build
 docker compose ps
-curl https://proxy.example.com/_gateway/health
+curl https://你的域名/_gateway/health
 ```
 
-## 使用方式
+## 管理面板功能概览
 
-配置了默认上游后，Emby/Jellyfin 客户端可以直接填写：
-
-```text
-https://proxy.example.com
-```
-
-完整 URL 模式：
-
-```text
-https://proxy.example.com/https://emby.example.com
-https://proxy.example.com/http://emby.example.com:8096
-```
-
-当上游返回新的 CDN 推流地址时，Refract 会把它改写成带短期 HMAC 签名的代理地址：
-
-```text
-原始：https://stream-cdn.example.net/video/master.m3u8?token=abc
-改写：https://proxy.example.com/https://stream-cdn.example.net/video/master.m3u8?token=abc&__vug_exp=...&__vug_sig=...
-```
-
-签名链接不需要加入初始上游列表，但仍会经过 DNS 和私网地址检查。
-
-## 管理面板
-
-| 页面 | 用途 |
+| 模块 | 主要能力 |
 | --- | --- |
-| 运行概览 | 实时速率、周期流量、请求地图、区域排行与系统状态 |
-| 主要后端 | 后端流量、请求、错误、最近活动及快捷屏蔽/放行 |
-| 实时连接 | 当前客户端、目标、路径、位置、速率、流量与断开操作 |
-| 统计报表 | 24 小时至 90 天趋势、后端、客户端和地域 CSV；展示统一周期流量合计 |
-| 访问规则 | 关闭、黑名单、白名单三种域名策略、每日开放时段与白名单域名额度 |
-| 审计日志 | 登录、规则、通知、连接和备份操作记录 |
-| 备份恢复 | 一致性快照、导入、下载、恢复与自动保留策略 |
-| 系统设置 | 二级菜单分别管理安全状态、运行配置、Telegram、Turnstile 与账号密码 |
+| 运行概览 | 实时吞吐、周期流量趋势、可缩放世界/中国省份请求地图、客户端峰值、Emby 与节点状态 |
+| 正在观看 / 历史 | 实时并发会话、多版本片源合并、画质与播放方式识别、一键踢线阻断与观影记录检索 |
+| 集群节点 (`v2.0`) | 主控/Edge 节点管理、一键接入命令、在线升级二进制、Linux 主网卡月流量配额与排空控制 |
+| 反代域名 (`v2.0`) | 多域绑定、节点分配、AutoTLS / DNS-01 证书状态、单域策略与前置 CDN IP 覆写 |
+| 智能 DNS (`v2.0`) | Cloudflare 多节点解析 / 故障切换组、AxisNow 三网智能解析方案与灰云 CNAME 联动 |
+| 防火墙 WAF (`v2.0`) | 可视化 DAG 流程规则编排（GeoIP / 播放器 / IP / 路径 / 开放时段）、触发 trace 与统计 |
+| 访问规则 / 统计 | 域名黑白名单、白名单流量额度、播放器与设备策略、24h~90d 统计报表与 CSV 导出 |
+| Emby 探针 / 通知 | 源站心跳可用率与延迟统计、Telegram 告警与日报、Turnstile 人机验证、审计日志与备份恢复 |
 
-管理登录按客户端 IP 启用防爆破保护：同一 IP 在 15 分钟内连续输错密码 5 次后封禁 24 小时，其他 IP 和已登录会话不受影响。封禁记录保存在管理数据库中，服务重启不会清除。
-
-访问规则只比较目标域名，与 URL 路径无关。`example.com` 会匹配自身和 `media.example.com`，不会误匹配 `badexample.com`：
-
-- **关闭**：面板保存的名单不参与判断；动态目标仍需匹配 `DEFAULT_UPSTREAM`、`ALLOWED_UPSTREAMS` 或有效签名。
-- **黑名单**：启用后由面板规则直接决定动态目标授权，名单内域名拒绝，其他域名放行，不需要把其他域名重复写入 `ALLOWED_UPSTREAMS`。
-- **白名单**：启用后只有面板中已启用的允许规则放行动态目标，不需要把这些域名重复写入 `ALLOWED_UPSTREAMS`。
-
-白名单中的每个域名可以单独设置累计单向下行额度，留空或设为 `0` 表示不限额。额度单位按 `1 GB = 1024³` 字节换算，只累计实际成功写给客户端的响应正文；上传流量、失败写入和协议开销不计入。达到额度后当前 HTTP 流或 WebSocket 会在额度字节边界停止，同一规则下的新请求返回拒绝响应。修改额度默认保留已用流量，面板可单独重置已用值。
-
-统计报表中的“后端排行”按目标域名聚合，“客户端排行”按来源 IP 聚合，因此单行数据不应逐行对应；两边的同周期总下行必须一致。新版本将同一个请求的两个维度放在同一 SQLite 事务中。旧版本曾丢失且无法反推到具体 IP 的历史差额会显示为“历史未归属（升级前）”，不会错误分摊到现有客户端。
-
-每日开放时段默认关闭。启用后，只有开放时段内才会继续按照上述访问模式处理请求，时段外所有代理请求均被拒绝；支持 `20:00–02:00` 这类跨午夜时段。保存启用的时段会断开当前代理连接，使新策略立即生效；时段内建立的流式连接会在关闭时间自动终止。开放时段、Telegram 日报、自动备份和面板时间统一固定为北京时间（`Asia/Shanghai`），不受 VPS 或浏览器时区影响。
-
-私网、回环和保留地址防护独立于上述模式，始终生效，除非显式设置 `ALLOW_PRIVATE_TARGETS=true`。
-
-## 主要配置
+## 主要配置变量
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `PROXY_DOMAIN` | 必填 | 已解析到 VPS 的公网域名 |
-| `DEFAULT_UPSTREAM` | 空 | 客户端不携带完整 URL 时使用的默认上游 |
-| `ALLOWED_UPSTREAMS` | 空 | 面板域名策略关闭时允许直接访问的初始目标，逗号分隔，支持 `*.example.com`；启用面板黑名单或白名单后，以面板策略为准 |
-| `SIGNING_SECRET` | 必填 | 至少 32 字符，用于动态推流 URL 签名 |
-| `SIGNED_URL_TTL` | `24h` | 动态签名链接有效期 |
-| `ALLOW_UNSIGNED_TARGETS` | `false` | 允许任意公网目标，即通用开放模式 |
-| `ALLOW_PRIVATE_TARGETS` | `false` | 允许私网、回环或保留地址目标 |
-| `PASS_CLIENT_IP` | `false` | 是否向上游传递客户端真实 IP |
-| `ADMIN_ENABLED` | `false` | 启用管理面板和统计持久化 |
-| `ADMIN_SESSION_TTL` | `12h` | 管理会话有效期 |
-| `GEOIP_LOOKUP_URL` | `ipwho.is` | 必须是含 `{ip}` 的 HTTPS 查询地址，留空关闭定位 |
-| `MAX_CONCURRENT_REQUESTS` | `256` | 全局并发请求限制 |
-| `MAX_CONCURRENT_PER_IP` | `64` | 单客户端 IP 并发限制 |
-| `MAX_DOWNLOAD_MBIT_PER_IP` | `0` | 单客户端所有连接合计下行上限，单位 Mbps；`0` 表示不限速 |
-| `RUNTIME_CONFIG_PATH` | 数据库同级 | 面板运行配置覆盖文件；留空自动使用 `runtime-config.json` |
-| `RESTART_ON_CONFIG_SAVE` | `false` | 保存运行配置后退出并由 systemd/Docker 自动重启 |
+| `REFRACT_ROLE` | `standalone` | 运行角色：`standalone`（单机）、`controller`（集群主控）或 `agent`（边缘节点） |
+| `PROXY_DOMAIN` | 必填 | 已解析到入口节点的公网域名 |
+| `DEFAULT_UPSTREAM` | 空 | 默认 Emby/Jellyfin 地址；设置后可直接用 `https://代理域名` 访问 |
+| `ALLOWED_UPSTREAMS` | 空 | 域名策略关闭时允许代理的目标主机，支持通配符 `*.example.com` |
+| `SIGNING_SECRET` | 必填 | 至少 32 字符，用于自动发现推流链接签名 |
+| `ALLOW_UNSIGNED_TARGETS` | `false` | 是否允许通用开放反代任意公网 URL |
+| `ALLOW_PRIVATE_TARGETS` | `false` | 是否允许访问私网/回环/保留地址（默认禁止防 SSRF） |
+| `TRUST_PROXY_HEADERS` | `false` | 是否允许采信转发头（**仅对匹配 `TRUSTED_PROXY_CIDRS` 的上游生效**） |
+| `TRUSTED_PROXY_CIDRS` | 空 | 可信前置代理/CDN CIDR 列表，如 Cloudflare/OpenFlare 节点段 |
+| `PASS_CLIENT_IP` | `false` | 是否向上游转发解析后的客户端真实 IP |
+| `UPSTREAM_IP_MODE` | `auto` | 连接上游时的 IP 解析策略：`auto`、`ipv4`、`ipv6` |
+| `ADMIN_ENABLED` | `false` | 是否启用中文管理控制台（`controller` 默认开启，`agent` 强制关闭） |
+| `ADMIN_SESSION_SECRET` | 必填 | 至少 32 字符的管理会话与敏感凭据加密主密钥 |
+| `GEOIP_LOOKUP_URL` | `ipwho.is` | 须为包含 `{ip}` 占位符的 HTTPS GeoIP 查询接口 |
+| `MAX_CONCURRENT_REQUESTS` | `256` | 全局最大并发请求数 |
+| `MAX_CONCURRENT_PER_IP` | `64` | 单客户端 IP 最大并发数 |
+| `MAX_DOWNLOAD_MBIT_PER_IP` | `0` | 单客户端 IP 所有连接聚合下行上限（Mbps，`0` 不限） |
 
-完整配置和注释参见 [.env.example](.env.example)。面板可以修改默认上游、允许上游、通用反代、客户端 IP、缓存、响应重写上限、超时、并发和单 IP 下行限速；入口域名涉及 DNS、证书和前置代理，只读展示。`SIGNING_SECRET`、管理会话密钥、密码 Hash 和数据库路径不会通过配置 API 返回。Turnstile 与 Telegram 密钥由面板保存，不写入环境变量；服务端使用从管理会话密钥派生的 AES-256-GCM 密钥加密。
-
-## 日常运维
-
-默认安装目录为 `/opt/refract`：
-
-```bash
-cd /opt/refract
-docker compose ps
-docker compose logs -f gateway caddy
-docker compose restart
-docker compose pull
-docker compose up -d --build
-```
-
-停止服务但保留数据：
-
-```bash
-docker compose down
-```
-
-不要在需要保留统计和配置时执行 `docker compose down -v`，它会删除数据库与证书数据卷。
+完整变量说明参见 [.env.example](.env.example)。面板内保存的可调配置位于 `runtime-config.json`，支持校验失败自动回滚；敏感密钥永不回传前端。
 
 ## 接入现有反向代理
 
-Refract 自身监听 HTTP `:8080`。不使用自带 Caddy 时，入口代理必须保留 `/https://` 中的双斜杠，并正确透传 WebSocket。Nginx 示例：
+使用外部 Nginx/Caddy 放在 Refract（HTTP `:8080`）前置时，务必保留原始斜杠与 WebSocket 升级头，并在前置层剥离不可信客户端伪造的 CDN IP 头：
 
 ```nginx
 map $http_upgrade $connection_upgrade {
@@ -273,6 +224,11 @@ server {
         proxy_set_header Host $http_host;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header CF-Connecting-IP "";
+        proxy_set_header True-Client-IP "";
+        proxy_set_header EO-Connecting-IP "";
+        proxy_set_header CF-IPCountry "";
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
         proxy_buffering off;
@@ -281,47 +237,28 @@ server {
 }
 ```
 
-同时设置：
-
-```dotenv
-PUBLIC_BASE_URL=https://proxy.example.com
-TRUST_PROXY_HEADERS=true
-```
-
 ## 安全模型
 
-- 面板域名策略关闭时，未签名初始 URL 必须匹配 `DEFAULT_UPSTREAM` 或 `ALLOWED_UPSTREAMS`；启用黑名单或白名单后，动态目标由面板规则授权。
-- 自动发现的 CDN URL 必须携带服务端 HMAC 签名，并受有效期限制。
-- 目标域名解析结果固定，连接前后都检查私网、回环和保留地址。
-- 默认不向上游传递客户端真实 IP，并移除常见代理与 Cloudflare 特征头。
-- 管理会话使用 `HttpOnly`、`Secure`、`SameSite=Strict` Cookie，写操作验证同源。
-- 日志不保存查询参数、Cookie、请求头或请求体，常见敏感字段会脱敏。
-- Turnstile 必须先通过配置自测才能启用，验证失败时默认拒绝登录。
+- 所有代理目标在 DNS 解析前后均固定校验并阻断私网、回环、链路本地及 IPv6 过渡保留地址（SSRF 防护）。
+- 前置代理头（`X-Real-IP`、`X-Forwarded-For`、`CF-Connecting-IP`、`CF-IPCountry` 等）严格校验证明来自 `TRUSTED_PROXY_CIDRS` 可信对端后才生效。
+- 管理员会话使用 `HttpOnly`、`Secure`、`SameSite=Strict` Cookie，写操作校验同源并内置防爆破 IP 封禁；SQLite 内敏感 API Token / 私钥使用派生 AES-256-GCM 密文存储。
+- Edge Agent 与 Controller 间通过独立节点密钥鉴权，Controller 公共探针/节点接口不暴露私有边缘节点清单元数据。
 
 漏洞报告方式参见 [SECURITY.md](SECURITY.md)。
-
-## 已知边界
-
-- Refract 不扫描或改写任意 HTML、CSS、JavaScript，因此不是完整网页镜像器。
-- JSON 只改写完整 URL 字符串和常见媒体路径字段。
-- 默认最多读取 8 MiB JSON/HLS 响应用于改写，更大响应保持流式原样转发。
-- 多个上游使用相同 Cookie 名时可能互相覆盖。
-- 使用外部 HTTP/SOCKS 出口代理时，最终 DNS 解析可能由出口代理执行，还需在出口侧限制目标。
-- IPPure 的公开 MyIP 接口只能返回调用方出口 IP，不能查询指定访客，因此默认使用支持 `{ip}` 的 `ipwho.is`。
 
 ## 开发与测试
 
 ```bash
-go test ./...
 go vet ./...
-sh -n scripts/install.sh
+go test -race ./...
+sh -n scripts/install.sh scripts/release-notes.sh
 docker build -t refract:dev .
 ```
 
-GitHub Actions 会在每次提交时执行测试、静态检查和容器构建。推送 `v*` 标签后，Release 工作流会自动交叉编译 Linux `amd64` / `arm64` 二进制，生成 `SHA256SUMS.txt`、完整发布包并发布到 GitHub Releases；也可以在 Actions 页面手动运行工作流，只生成临时构建产物。
+GitHub Actions 会在提交时执行全量测试，并在推送 `v*` 标签后交叉编译 Linux `amd64` / `arm64` 产物、生成 `SHA256SUMS.txt` 与 Release（带 `-` 的预发布标签会自动标记为 Pre-release）。
 
-贡献规范参见 [CONTRIBUTING.md](CONTRIBUTING.md)，版本变化参见 [CHANGELOG.md](CHANGELOG.md)。
+贡献规范参见 [CONTRIBUTING.md](CONTRIBUTING.md)，更新日志参见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 许可证与致谢
 
-Refract 源码使用 [MIT License](LICENSE)。内置的 Lucide、Apache ECharts、OpenFlare 地图数据及其他来源说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 和 [Apache License 2.0](LICENSE-APACHE-2.0)。
+Refract 源码采用 [MIT License](LICENSE) 开源。内置的 Lucide、Apache ECharts、地图数据及其他第三方声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与 [Apache License 2.0](LICENSE-APACHE-2.0)。

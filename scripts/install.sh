@@ -7,6 +7,8 @@ INSTALL_DIR="${REFRACT_INSTALL_DIR:-/opt/refract}"
 COMPOSE_VERSION="${REFRACT_COMPOSE_VERSION:-v5.4.0}"
 RELEASE_BASE_URL="${REFRACT_RELEASE_BASE_URL:-https://github.com/T-Matrix/Refract/releases/latest/download}"
 
+role="${REFRACT_ROLE:-standalone}"
+target_version="${REFRACT_VERSION:-}"
 domain="${REFRACT_DOMAIN:-}"
 upstream="${REFRACT_UPSTREAM:-}"
 allowed_upstreams="${REFRACT_ALLOWED_UPSTREAMS:-}"
@@ -26,6 +28,8 @@ Refract 一键部署脚本
 
 选项：
   --domain DOMAIN          已解析到 VPS 的域名
+  --role ROLE              运行模式：standalone（单机，默认）或 controller（集群控制面）
+  --version TAG            旧版 systemd 指定更新目标标签（如 v2.0.0-beta.1）；不传则拉取 Latest
   --upstream URL           默认上游，例如 https://emby.example.com；交互安装可留空
   --allow-hosts LIST       可直接访问的初始上游，逗号分隔
   --admin-user USER        初始管理员用户名，默认 admin
@@ -38,7 +42,7 @@ Refract 一键部署脚本
 
 环境变量：
   REFRACT_REPO_URL、REFRACT_BRANCH、REFRACT_INSTALL_DIR、REFRACT_COMPOSE_VERSION
-  REFRACT_RELEASE_BASE_URL
+  REFRACT_RELEASE_BASE_URL、REFRACT_VERSION、REFRACT_ROLE
   REFRACT_DOMAIN、REFRACT_UPSTREAM、REFRACT_ALLOWED_UPSTREAMS
   REFRACT_ADMIN_USER、REFRACT_PUBLIC_PROXY、REFRACT_ALLOW_PRIVATE_TARGETS
 
@@ -106,6 +110,16 @@ while [ "$#" -gt 0 ]; do
             domain="$2"
             shift 2
             ;;
+        --role)
+            [ "$#" -ge 2 ] || fail "--role 缺少值"
+            role="$2"
+            shift 2
+            ;;
+        --version)
+            [ "$#" -ge 2 ] || fail "--version 缺少值"
+            target_version="$2"
+            shift 2
+            ;;
         --upstream)
             [ "$#" -ge 2 ] || fail "--upstream 缺少值"
             upstream="$2"
@@ -151,6 +165,24 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+role="$(printf '%s' "$role" | tr '[:upper:]' '[:lower:]')"
+case "$role" in
+    ""|standalone) role=standalone ;;
+    controller) role=controller ;;
+    *) fail "--role 仅支持 standalone 或 controller，当前为：$role" ;;
+esac
+
+if [ -n "$target_version" ]; then
+    printf '%s' "$target_version" | grep -Eq '^[A-Za-z0-9._-]+$' || fail "--version 格式不正确：$target_version"
+    case "$target_version" in
+        v*) ;;
+        *) target_version="v$target_version" ;;
+    esac
+    if [ -z "${REFRACT_RELEASE_BASE_URL:-}" ]; then
+        RELEASE_BASE_URL="https://github.com/T-Matrix/Refract/releases/download/$target_version"
+    fi
+fi
 
 [ "$(uname -s)" = "Linux" ] || fail "一键脚本只支持 Linux VPS"
 [ "$(id -u)" -eq 0 ] || fail "请使用 root 运行，或在命令前加 sudo"
@@ -444,36 +476,43 @@ else
     fi
     valid_domain "$domain" || fail "域名格式不正确：$domain"
 
-    if [ -z "$upstream" ] && [ -z "$allowed_upstreams" ] && ! is_true "$public_proxy"; then
-        upstream="$(ask "请输入默认 Emby/Jellyfin 地址（留空启用通用反代）")"
-        if [ -z "$upstream" ]; then
-            if ! has_interactive_terminal; then
-                fail "非交互安装未配置默认上游；如需通用反代，请显式添加 --public-proxy"
+    if [ "$role" = "controller" ]; then
+        upstream=""
+        allowed_upstreams=""
+        public_proxy=false
+        valid_admin_user "$admin_user" || fail "管理员用户名只能包含字母、数字及 _ . @ -"
+    else
+        if [ -z "$upstream" ] && [ -z "$allowed_upstreams" ] && ! is_true "$public_proxy"; then
+            upstream="$(ask "请输入默认 Emby/Jellyfin 地址（留空启用通用反代）")"
+            if [ -z "$upstream" ]; then
+                if ! has_interactive_terminal; then
+                    fail "非交互安装未配置默认上游；如需通用反代，请显式添加 --public-proxy"
+                fi
+                public_proxy=true
+                inferred_public_proxy=1
+            fi
+        fi
+        if [ -n "$upstream" ]; then
+            valid_upstream "$upstream" || fail "上游必须是仅含协议和主机的 HTTP/HTTPS 地址"
+            upstream="${upstream%/}"
+        fi
+        valid_host_list "$allowed_upstreams" || fail "初始上游列表格式不正确"
+        valid_admin_user "$admin_user" || fail "管理员用户名只能包含字母、数字及 _ . @ -"
+
+        if is_true "$public_proxy"; then
+            warn "通用开放模式允许任何用户代理任意公网 HTTP/HTTPS 目标，可能被滥用。私网与保留地址仍默认阻止。"
+            confirm_default=n
+            if [ "$inferred_public_proxy" -eq 1 ]; then
+                confirm_default=y
+            fi
+            if [ "$assume_yes" -ne 1 ] && ! confirm "确认启用通用开放模式" "$confirm_default"; then
+                fail "已取消部署"
             fi
             public_proxy=true
-            inferred_public_proxy=1
+        else
+            public_proxy=false
+            [ -n "$upstream" ] || [ -n "$allowed_upstreams" ] || fail "安全模式至少需要 --upstream 或 --allow-hosts"
         fi
-    fi
-    if [ -n "$upstream" ]; then
-        valid_upstream "$upstream" || fail "上游必须是仅含协议和主机的 HTTP/HTTPS 地址"
-        upstream="${upstream%/}"
-    fi
-    valid_host_list "$allowed_upstreams" || fail "初始上游列表格式不正确"
-    valid_admin_user "$admin_user" || fail "管理员用户名只能包含字母、数字及 _ . @ -"
-
-    if is_true "$public_proxy"; then
-        warn "通用开放模式允许任何用户代理任意公网 HTTP/HTTPS 目标，可能被滥用。私网与保留地址仍默认阻止。"
-        confirm_default=n
-        if [ "$inferred_public_proxy" -eq 1 ]; then
-            confirm_default=y
-        fi
-        if [ "$assume_yes" -ne 1 ] && ! confirm "确认启用通用开放模式" "$confirm_default"; then
-            fail "已取消部署"
-        fi
-        public_proxy=true
-    else
-        public_proxy=false
-        [ -n "$upstream" ] || [ -n "$allowed_upstreams" ] || fail "安全模式至少需要 --upstream 或 --allow-hosts"
     fi
 
     if is_true "$allow_private"; then
@@ -492,6 +531,7 @@ else
     say "生成安全配置"
     umask 077
     cat >"$env_file" <<EOF
+REFRACT_ROLE=$role
 PROXY_DOMAIN=$domain
 DEFAULT_UPSTREAM=$upstream
 ALLOWED_UPSTREAMS=$allowed_upstreams
@@ -499,7 +539,9 @@ SIGNING_SECRET=$signing_secret
 SIGNED_URL_TTL=24h
 ALLOW_UNSIGNED_TARGETS=$public_proxy
 ALLOW_PRIVATE_TARGETS=$allow_private
+TRUSTED_PROXY_CIDRS=
 PASS_CLIENT_IP=false
+UPSTREAM_IP_MODE=auto
 DISABLE_CACHE=true
 REWRITE_MAX_BYTES=8388608
 DNS_CACHE_TTL=1m
@@ -513,6 +555,7 @@ ADMIN_SESSION_SECRET=$session_secret
 ADMIN_SESSION_TTL=12h
 ADMIN_DATABASE_PATH=/data/gateway.db
 ADMIN_BACKUP_DIR=/data/backups
+REFRACT_AGENT_BINARY_DIR=/data/agent-binaries
 GEOIP_LOOKUP_URL=https://ipwho.is/{ip}?fields=success,ip,country,country_code,region,latitude,longitude
 GEOIP_LOOKUP_TIMEOUT=8s
 GEOIP_LOOKUP_INTERVAL=1100ms
