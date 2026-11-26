@@ -29,6 +29,7 @@ type liveSnapshot struct {
 	UploadTotal    int64                 `json:"upload_total"`
 	DownloadTotal  int64                 `json:"download_total"`
 	ActiveRequests int64                 `json:"active_requests"`
+	WatchingCount  int                   `json:"watching_count"`
 	ActiveTargets  []activeTargetTraffic `json:"active_targets"`
 }
 
@@ -122,6 +123,9 @@ func (m *rateMeter) SetClientPeakSink(sink func(string, int64)) {
 }
 
 func (m *rateMeter) Snapshot(active int64) liveSnapshot {
+	if m == nil {
+		return liveSnapshot{ActiveRequests: active}
+	}
 	return liveSnapshot{
 		UploadBPS: m.uploadRate.Load(), DownloadBPS: m.downloadRate.Load(),
 		UploadTotal: m.uploadTotal.Load(), DownloadTotal: m.downloadTotal.Load(), ActiveRequests: active,

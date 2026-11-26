@@ -2,6 +2,27 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 的结构，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.0.0-beta.1] - 2026-11-26
+
+### 新增
+
+- 新增 Controller / Edge Agent 分布式集群架构，支持节点注册发现、实时配置下发、在线二进制升级与多域名集中管理。
+- 支持边缘节点 AutoTLS（Let's Encrypt HTTP-01 / DNS-01）与 Cloudflare / AxisNow 智能多线 DNS 调度及健康故障切换。
+- 新增可视化 DAG 防火墙（WAF）规则与客户端 GeoIP 国家/地区访问控制。
+- 新增 Emby 实时“正在观看 / 播放历史”监控、多版本片源自动归并、实时码率展示与单流踢线阻断。
+- 新增边缘节点 Linux 主网卡（双向 / 出站 / 入站）月度流量计费、告警与自动排空恢复机制。
+
+### 修复
+
+- 完善 SemVer 预发布版本号（如 `v2.0.0-beta.1`）解析与升级比较，并支持自动识别发布为 GitHub Pre-release。
+- 修复 `AdditionalParts`、字幕及缩略图等非流路径误建播放会话与别名循环问题，完善播放记录清洗。
+- 加固网卡计费采样乱序与重置保护、排除 `RTF_REJECT` 与虚拟网卡并沿 `lower_*` 解析物理主网卡。
+
+### 安全
+
+- 严格校验可信代理 CIDR 与自定义客户端 IP 头，阻断 Real-IP 与 `CF-IPCountry` 伪造。
+- 修复 AutoTLS HTTP 跳转 Open Redirect、WAF 查询路径匹配及动态目标设备识别绕过问题，收紧 Controller 公开接口视图与安全响应头。
+
 ## [1.18.0] - 2026-10-19
 
 ### 新增
@@ -197,3 +218,4 @@
 [1.16.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.16.0
 [1.17.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.17.0
 [1.18.0]: https://github.com/T-Matrix/Refract/releases/tag/v1.18.0
+[2.0.0-beta.1]: https://github.com/T-Matrix/Refract/releases/tag/v2.0.0-beta.1

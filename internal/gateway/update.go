@@ -25,28 +25,28 @@ import (
 	"time"
 )
 
-var Version = "1.18.0"
+var Version = "2.0.0-beta.1"
 
 const currentReleaseNotes = `## 新增功能
 
-- 管理员可以维护 Emby 服务器分组、线路和备注，并查看在线状态、SLA 与延迟；线路和备注支持编辑、公开展示和备份恢复。
-- 将播放器管理统一为“禁用播放器”，支持关闭、黑名单和白名单模式，并可从最近请求一键添加播放器。
-- 首页访问记录、最近请求和统计报表自动匹配 Emby 健康监测中配置的服务器名、线路和备注。
+- 新增 Controller / Edge Agent 分布式集群架构、在线版本下发与多域名集中管理。
+- 支持边缘节点 AutoTLS（Let's Encrypt HTTP-01 / DNS-01）与 Cloudflare / AxisNow 智能多线 DNS 调度及故障切换。
+- 新增可视化 DAG 防火墙（WAF）规则与客户端 GeoIP 访问控制。
+- 新增 Emby 服务器实时“正在观看 / 播放历史”会话监控、多版本片源归并、实时码率与单流踢线阻断。
+- 新增边缘节点 Linux 主网卡（双向 / 出站 / 入站）月度流量计费、告警与自动排空恢复机制。
 
 ## 修复内容
 
-- 健康检查会根据真实 HTTP 响应判断服务状态，包含 4xx/5xx 响应时也能记录可用的响应信息。
-- 播放器访问策略按 Emby 客户端名称统一判断；已有禁用播放器规则在升级后默认按黑名单继续生效。
-- 线路匹配时区分主机和端口，避免同一域名下不同 Emby 服务错误共用备注。
+- 支持 SemVer 预发布版本号（如 v2.0.0-beta.1）解析、升级比对与自动化 Pre-release 发布。
+- 排除 /AdditionalParts、字幕与缩略图等非流请求误创建播放会话的问题，并完善播放缓存与踢线校验。
+- 加固网卡计费抗乱序与重置校验、DNS 缓存精细失效及跨平台编译兼容。
 
 ## 安全
 
-- 播放器黑白名单在代理请求进入后统一执行，避免通过不同请求路径绕过策略。
-- 播放器名单、模式和备注持久化到 SQLite，并随备份保留。
-- 面板域名策略启用后直接参与动态目标授权，不再要求重复填写 ALLOWED_UPSTREAMS。
-- 运行配置明确说明环境允许列表与面板策略的授权关系。`
+- 严格校验可信代理 CIDR 与自定义客户端 IP 头，阻断 Real-IP 与 CF-IPCountry 伪造。
+- 修复 AutoTLS HTTP 跳转 Open Redirect、WAF 查询路径匹配与动态目标设备识别绕过问题，收紧 Controller 公开节点接口视图。`
 
-const currentReleasePublishedAt = "2026-10-19T00:00:00+08:00"
+const currentReleasePublishedAt = "2026-11-26T00:00:00+08:00"
 
 const (
 	defaultReleaseAPI        = "https://api.github.com/repos/T-Matrix/Refract/releases/latest"
@@ -58,7 +58,7 @@ const (
 )
 
 var (
-	versionPattern = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)$`)
+	versionPattern = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$`)
 	servicePattern = regexp.MustCompile(`^[A-Za-z0-9_.@-]+\.service$`)
 )
 
@@ -131,10 +131,18 @@ type updateManager struct {
 	maintenanceSocket string
 	unsupported       string
 
-	cacheMu    sync.Mutex
-	cached     updateStatus
-	cacheUntil time.Time
-	updating   atomic.Bool
+	cacheMu       sync.Mutex
+	cached        updateStatus
+	cacheUntil    time.Time
+	updating      atomic.Bool
+	updatingSince atomic.Int64
+}
+
+func isAllowedReleaseRedirectHost(host string) bool {
+	h := normalizeHost(host)
+	return h == "github.com" || h == "api.github.com" ||
+		strings.HasSuffix(h, ".github.com") ||
+		strings.HasSuffix(h, ".githubusercontent.com")
 }
 
 func newUpdateManager(cfg Config) *updateManager {
@@ -147,6 +155,9 @@ func newUpdateManager(cfg Config) *updateManager {
 				}
 				if request.URL.Scheme != "https" {
 					return errors.New("release download redirected to a non-HTTPS URL")
+				}
+				if !isAllowedReleaseRedirectHost(request.URL.Hostname()) {
+					return fmt.Errorf("release download redirected to untrusted host %q", request.URL.Hostname())
 				}
 				return nil
 			},
@@ -364,7 +375,7 @@ func (m *updateManager) ReleaseNotes(ctx context.Context, version string) (relea
 		return fallback, nil
 	}
 	releaseVersion, valid := parseVersion(payload.TagName)
-	if !valid || releaseVersion.String() != parsed.String() || payload.Draft || payload.Prerelease {
+	if !valid || releaseVersion.String() != parsed.String() || payload.Draft || (payload.Prerelease && parsed.prerelease == "") {
 		return fallback, nil
 	}
 	tag := strings.TrimSpace(payload.TagName)
@@ -425,6 +436,13 @@ func (m *updateManager) Start(ctx context.Context, requestedVersion string) (upd
 			return updateStatus{}, err
 		}
 		started = true
+		m.updatingSince.Store(time.Now().Unix())
+		go func(since int64) {
+			time.Sleep(10 * time.Minute)
+			if m.updatingSince.Load() == since {
+				m.updating.Store(false)
+			}
+		}(m.updatingSince.Load())
 		status.Updating = true
 		return status, nil
 	}
@@ -466,6 +484,13 @@ func (m *updateManager) Start(ctx context.Context, requestedVersion string) (upd
 	}
 	started = true
 	removeStaged = false
+	m.updatingSince.Store(time.Now().Unix())
+	go func(since int64) {
+		time.Sleep(10 * time.Minute)
+		if m.updatingSince.Load() == since {
+			m.updating.Store(false)
+		}
+	}(m.updatingSince.Load())
 	status.Updating = true
 	return status, nil
 }
@@ -505,6 +530,20 @@ func (m *updateManager) requestMaintenanceUpdate(ctx context.Context, version st
 	return nil
 }
 
+func acquireCrossProcessUpdateLock() (func(), error) {
+	lockPath := filepath.Join(os.TempDir(), "refract-maintenance-update.lock")
+	if info, err := os.Stat(lockPath); err == nil && time.Since(info.ModTime()) > 10*time.Minute {
+		_ = os.Remove(lockPath)
+	}
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, errors.New("another update is already in progress")
+	}
+	_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
+	_ = f.Close()
+	return func() { _ = os.Remove(lockPath) }, nil
+}
+
 // RunMaintenanceRequest is the root-only side of the systemd socket. Its
 // protocol intentionally exposes no command, URL, service, or filesystem path.
 func RunMaintenanceRequest(input io.Reader, output io.Writer) error {
@@ -514,6 +553,11 @@ func RunMaintenanceRequest(input io.Reader, output io.Writer) error {
 	if os.Geteuid() != 0 {
 		return respond(maintenanceResponse{Error: "maintenance helper requires root"})
 	}
+	releaseLock, lockErr := acquireCrossProcessUpdateLock()
+	if lockErr != nil {
+		return respond(maintenanceResponse{Error: lockErr.Error()})
+	}
+	defer releaseLock()
 	var request maintenanceRequest
 	decoder := json.NewDecoder(io.LimitReader(input, maxReleaseMetadata))
 	decoder.DisallowUnknownFields()
@@ -670,18 +714,23 @@ func checksumForAsset(manifest []byte, asset string) (string, error) {
 }
 
 type semanticVersion struct {
-	major int
-	minor int
-	patch int
+	major      int
+	minor      int
+	patch      int
+	prerelease string
 }
 
 func (v semanticVersion) String() string {
-	return fmt.Sprintf("%d.%d.%d", v.major, v.minor, v.patch)
+	base := fmt.Sprintf("%d.%d.%d", v.major, v.minor, v.patch)
+	if v.prerelease != "" {
+		return base + "-" + v.prerelease
+	}
+	return base
 }
 
 func parseVersion(raw string) (semanticVersion, bool) {
 	matches := versionPattern.FindStringSubmatch(strings.TrimSpace(raw))
-	if len(matches) != 4 {
+	if len(matches) < 4 {
 		return semanticVersion{}, false
 	}
 	values := make([]int, 3)
@@ -692,7 +741,11 @@ func parseVersion(raw string) (semanticVersion, bool) {
 		}
 		values[index] = value
 	}
-	return semanticVersion{major: values[0], minor: values[1], patch: values[2]}, true
+	pre := ""
+	if len(matches) >= 5 {
+		pre = matches[4]
+	}
+	return semanticVersion{major: values[0], minor: values[1], patch: values[2], prerelease: pre}, true
 }
 
 func normalizedVersion(raw string) string {
@@ -701,6 +754,74 @@ func normalizedVersion(raw string) string {
 		return strings.TrimPrefix(strings.TrimSpace(raw), "v")
 	}
 	return version.String()
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func comparePrerelease(a, b string) int {
+	if a == b {
+		return 0
+	}
+	if a == "" {
+		return 1
+	}
+	if b == "" {
+		return -1
+	}
+	ap := strings.Split(a, ".")
+	bp := strings.Split(b, ".")
+	limit := min(len(ap), len(bp))
+	for i := 0; i < limit; i++ {
+		ai, bi := ap[i], bp[i]
+		if ai == bi {
+			continue
+		}
+		aNum, bNum := isAllDigits(ai), isAllDigits(bi)
+		switch {
+		case aNum && bNum:
+			av, _ := strconv.Atoi(ai)
+			bv, _ := strconv.Atoi(bi)
+			if av < bv {
+				return -1
+			}
+			if av > bv {
+				return 1
+			}
+			if len(ai) != len(bi) {
+				if len(ai) < len(bi) {
+					return -1
+				}
+				return 1
+			}
+		case aNum != bNum:
+			if aNum {
+				return -1
+			}
+			return 1
+		default:
+			if ai < bi {
+				return -1
+			}
+			return 1
+		}
+	}
+	if len(ap) < len(bp) {
+		return -1
+	}
+	if len(ap) > len(bp) {
+		return 1
+	}
+	return 0
 }
 
 func compareVersions(left, right string) int {
@@ -717,7 +838,7 @@ func compareVersions(left, right string) int {
 			return 1
 		}
 	}
-	return 0
+	return comparePrerelease(a.prerelease, b.prerelease)
 }
 
 func detectSystemdService() string {

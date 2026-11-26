@@ -4,6 +4,13 @@
 
 	reverse_proxy gateway:8080 {
 		flush_interval 100ms
+		# Strip spoofable external proxy/CDN headers and forward Caddy's verified client IP.
+		# If deployed behind Cloudflare/OpenFlare/CDN, configure trusted_proxies for your CDN CIDRs.
+		header_up -CF-Connecting-IP
+		header_up -True-Client-IP
+		header_up -EO-Connecting-IP
+		header_up -CF-IPCountry
+		header_up X-Real-IP {http.request.client_ip}
 	}
 
 	log {

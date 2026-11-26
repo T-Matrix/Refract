@@ -3,8 +3,10 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,8 +17,48 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync"
 	"time"
 )
+
+type cachedBrandAvatar struct {
+	loaded    bool
+	custom    bool
+	data      []byte
+	mime      string
+	etag      string
+	updatedAt int64
+}
+
+var (
+	brandAvatarCacheMu   sync.RWMutex
+	brandAvatarCaches    = make(map[*telemetryStore]cachedBrandAvatar)
+	defaultAvatarOnce    sync.Once
+	defaultBrandAvatarVal cachedBrandAvatar
+)
+
+func getDefaultBrandAvatar() cachedBrandAvatar {
+	defaultAvatarOnce.Do(func() {
+		data, _ := webAssets.ReadFile(path.Join("web", "refract-icon.png"))
+		sum := sha256.Sum256(data)
+		defaultBrandAvatarVal = cachedBrandAvatar{
+			loaded: true,
+			data:   data,
+			mime:   "image/png",
+			etag:   `"` + hex.EncodeToString(sum[:12]) + `"`,
+		}
+	})
+	return defaultBrandAvatarVal
+}
+
+func invalidateBrandAvatarCache(store *telemetryStore) {
+	if store == nil {
+		return
+	}
+	brandAvatarCacheMu.Lock()
+	delete(brandAvatarCaches, store)
+	brandAvatarCacheMu.Unlock()
+}
 
 const (
 	brandingAvatarSetting = "branding_avatar_v1"
@@ -63,11 +105,15 @@ func (s *telemetryStore) saveBrandingAvatar(ctx context.Context, mime string, da
 	if err := s.setSetting(ctx, brandingAvatarSetting, string(encoded)); err != nil {
 		return brandingView{}, err
 	}
+	invalidateBrandAvatarCache(s)
 	return brandingView{Custom: true, UpdatedAt: avatar.UpdatedAt}, nil
 }
 
 func (s *telemetryStore) clearBrandingAvatar(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM gateway_settings WHERE key=?`, brandingAvatarSetting)
+	if err == nil {
+		invalidateBrandAvatarCache(s)
+	}
 	return err
 }
 
@@ -144,32 +190,66 @@ func (g *Gateway) serveBrandAvatar(writer http.ResponseWriter, request *http.Req
 		return false
 	}
 	publicFrontendHeaders(writer)
-	writer.Header().Set("Cache-Control", "no-store")
 	if request.Method != http.MethodGet && request.Method != http.MethodHead {
+		writer.Header().Set("Cache-Control", "no-store")
 		writer.Header().Set("Allow", http.MethodGet+", "+http.MethodHead)
 		writeGatewayError(writer, http.StatusMethodNotAllowed, "method not allowed")
 		return true
 	}
 
-	data, mime := []byte(nil), ""
+	var cached cachedBrandAvatar
 	if g.telemetry != nil {
-		if avatar, custom, err := g.telemetry.loadBrandingAvatar(request.Context()); err == nil && custom {
-			data, mime = decodeBrandAvatar(avatar)
+		brandAvatarCacheMu.RLock()
+		cached = brandAvatarCaches[g.telemetry]
+		brandAvatarCacheMu.RUnlock()
+		if !cached.loaded {
+			data, mimeType := []byte(nil), ""
+			custom := false
+			var updatedAt int64
+			if raw, err := g.telemetry.setting(request.Context(), brandingAvatarSetting); err == nil && raw != "" {
+				var avatar brandingAvatar
+				if json.Unmarshal([]byte(raw), &avatar) == nil {
+					if dec, dErr := base64.StdEncoding.DecodeString(avatar.Data); dErr == nil && validBrandAvatar(dec, avatar.MIME) {
+						data, mimeType, custom, updatedAt = dec, avatar.MIME, true, avatar.UpdatedAt
+					}
+				}
+			}
+			if len(data) == 0 {
+				def := getDefaultBrandAvatar()
+				data, mimeType = def.data, def.mime
+			}
+			sum := sha256.Sum256(data)
+			cached = cachedBrandAvatar{
+				loaded:    true,
+				custom:    custom,
+				data:      data,
+				mime:      mimeType,
+				etag:      `"` + hex.EncodeToString(sum[:12]) + `"`,
+				updatedAt: updatedAt,
+			}
+			brandAvatarCacheMu.Lock()
+			brandAvatarCaches[g.telemetry] = cached
+			brandAvatarCacheMu.Unlock()
 		}
+	} else {
+		cached = getDefaultBrandAvatar()
 	}
-	if len(data) == 0 {
-		data, _ = webAssets.ReadFile(path.Join("web", "refract-icon.png"))
-		mime = "image/png"
-	}
-	if len(data) == 0 {
+	if len(cached.data) == 0 {
+		writer.Header().Set("Cache-Control", "no-store")
 		http.Error(writer, "avatar unavailable", http.StatusInternalServerError)
 		return true
 	}
-	writer.Header().Set("Content-Type", mime)
-	writer.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("ETag", cached.etag)
+	if inm := strings.TrimSpace(request.Header.Get("If-None-Match")); inm != "" && inm == cached.etag {
+		writer.WriteHeader(http.StatusNotModified)
+		return true
+	}
+	writer.Header().Set("Content-Type", cached.mime)
+	writer.Header().Set("Content-Length", fmt.Sprintf("%d", len(cached.data)))
 	writer.WriteHeader(http.StatusOK)
 	if request.Method != http.MethodHead {
-		_, _ = writer.Write(data)
+		_, _ = writer.Write(cached.data)
 	}
 	return true
 }
@@ -200,6 +280,9 @@ func (a *adminServer) handleBranding(writer http.ResponseWriter, request *http.R
 		if err := request.ParseMultipartForm(maxBrandAvatarBytes); err != nil {
 			a.writeError(writer, http.StatusBadRequest, "invalid avatar upload")
 			return
+		}
+		if request.MultipartForm != nil {
+			defer request.MultipartForm.RemoveAll()
 		}
 		file, _, err := request.FormFile("avatar")
 		if err != nil {

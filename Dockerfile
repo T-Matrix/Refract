@@ -3,7 +3,7 @@ FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
 ARG TARGETOS
 ARG TARGETARCH
-ARG REFRACT_VERSION=1.18.0
+ARG REFRACT_VERSION=2.0.0-beta.1
 
 WORKDIR /src
 COPY go.mod go.sum ./

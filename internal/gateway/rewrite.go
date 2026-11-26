@@ -7,6 +7,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
@@ -21,6 +22,14 @@ func (g *Gateway) modifyResponse(response *http.Response) error {
 	}
 
 	g.rewriteResponseHeaders(response, info)
+	if g.playback != nil && info != nil {
+		if response.StatusCode >= http.StatusOK && response.StatusCode < http.StatusMultipleChoices && len(info.PlayingReportBody) > 0 {
+			if reportItemID, needLookup := g.playback.ObservePlayingReport(info.PlaybackMeta, info.PlayingReportBody); needLookup {
+				g.playback.FetchItemMetadataAsync(info.PlaybackMeta, reportItemID)
+			}
+		}
+		g.playback.ObserveStreamResponseHeaders(info.PlaybackMeta, response.Header)
+	}
 	if !responseHasBody(response.StatusCode, response.Request.Method) {
 		return nil
 	}
@@ -32,7 +41,19 @@ func (g *Gateway) modifyResponse(response *http.Response) error {
 	if kind == "" || response.Body == nil {
 		return nil
 	}
-	body, tooLarge, err := readLimitedBody(response.Body, g.cfg.RewriteMaxBytes)
+	if g.rewriteSem != nil {
+		select {
+		case g.rewriteSem <- struct{}{}:
+			defer func() { <-g.rewriteSem }()
+		case <-response.Request.Context().Done():
+			return response.Request.Context().Err()
+		}
+	}
+	maxBytes := g.liveRuntime().RewriteMaxBytes
+	if info.RewriteMaxBytes > 0 {
+		maxBytes = info.RewriteMaxBytes
+	}
+	body, tooLarge, err := readLimitedBody(response.Body, maxBytes)
 	if err != nil {
 		return err
 	}
@@ -69,29 +90,60 @@ func (g *Gateway) modifyResponse(response *http.Response) error {
 	return nil
 }
 
+func isActiveDocumentContentType(contentType string) bool {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		mediaType = strings.TrimSpace(strings.Split(contentType, ";")[0])
+	}
+	mediaType = strings.ToLower(mediaType)
+	switch mediaType {
+	case "", "text/html", "application/xhtml+xml", "image/svg+xml", "text/xml", "application/xml", "text/javascript", "application/javascript":
+		return true
+	default:
+		return strings.HasSuffix(mediaType, "+xml")
+	}
+}
+
 func (g *Gateway) rewriteResponseHeaders(response *http.Response, info *targetInfo) {
 	headers := response.Header
 	headers.Del("Server")
 	headers.Del("X-Powered-By")
-	if g.cfg.DisableCache {
+	headers.Set("X-Content-Type-Options", "nosniff")
+	if g.cfg.AdminEnabled && info != nil && info.Dynamic && isActiveDocumentContentType(headers.Get("Content-Type")) {
+		// Prevent active content proxied from dynamic/arbitrary third-party origins from
+		// executing scripts in the same origin as the standalone admin panel.
+		headers.Set("Content-Security-Policy", "sandbox")
+	}
+	disableCache := g.liveRuntime().DisableCache
+	if info != nil && info.DisableCache != nil {
+		disableCache = *info.DisableCache
+	}
+	if disableCache {
 		headers.Set("Cache-Control", "no-store")
 	}
 	headers.Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges, Location, Content-Location, X-Emby-Auth-Token, X-MediaBrowser-Auth-Token")
 
 	requestOrigin := strings.TrimSpace(info.ClientOrigin)
-	if requestOrigin == "" {
-		headers.Set("Access-Control-Allow-Origin", "*")
-		headers.Del("Access-Control-Allow-Credentials")
-	} else {
+	publicOrigin := strings.TrimRight(strings.TrimSpace(info.PublicBase), "/")
+	if requestOrigin != "" && publicOrigin != "" && strings.EqualFold(requestOrigin, publicOrigin) {
 		headers.Set("Access-Control-Allow-Origin", requestOrigin)
 		headers.Set("Access-Control-Allow-Credentials", "true")
 		headers.Add("Vary", "Origin")
+	} else {
+		headers.Set("Access-Control-Allow-Origin", "*")
+		headers.Del("Access-Control-Allow-Credentials")
+		if requestOrigin != "" {
+			headers.Add("Vary", "Origin")
+		}
 	}
 
 	for _, name := range []string{"Location", "Content-Location"} {
 		if value := headers.Get(name); value != "" {
-			if rewritten, ok := g.rewriteReference(value, info.URL, info); ok {
+			if rewritten, resolvedTarget, ok := g.rewriteReferenceWithTarget(value, info.URL, info); ok {
 				headers.Set(name, rewritten)
+				if name == "Location" && isRedirectStatus(response.StatusCode) && g.playback != nil && info != nil {
+					g.playback.ObserveStreamRedirect(info.PlaybackMeta, resolvedTarget)
+				}
 			}
 		}
 	}
@@ -103,21 +155,48 @@ func (g *Gateway) rewriteResponseHeaders(response *http.Response, info *targetIn
 	g.rewriteCookies(headers)
 }
 
+func isRedirectStatus(code int) bool {
+	return code == http.StatusMovedPermanently ||
+		code == http.StatusFound ||
+		code == http.StatusSeeOther ||
+		code == http.StatusTemporaryRedirect ||
+		code == http.StatusPermanentRedirect
+}
+
 func (g *Gateway) rewriteReference(raw string, base *url.URL, info *targetInfo) (string, bool) {
+	rewritten, _, ok := g.rewriteReferenceWithTarget(raw, base, info)
+	return rewritten, ok
+}
+
+func (g *Gateway) rewriteReferenceWithTarget(raw string, base *url.URL, info *targetInfo) (string, *url.URL, bool) {
 	reference, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
-		return raw, false
+		return raw, nil, false
 	}
 	target := base.ResolveReference(reference)
-	if target.Scheme != "http" && target.Scheme != "https" {
-		return raw, false
+	if (target.Scheme != "http" && target.Scheme != "https") || target.Hostname() == "" || target.User != nil {
+		return raw, nil, false
 	}
-	return g.publicURLForTarget(target, info), true
+	if info != nil && info.PublicBase != "" {
+		if pub, pErr := url.Parse(info.PublicBase); pErr == nil && sameOrigin(target, pub) {
+			return raw, nil, false
+		}
+	}
+	if !g.cfg.AllowPrivateTargets {
+		if addr, parseErr := netip.ParseAddr(strings.Trim(target.Hostname(), "[]")); parseErr == nil && isBlockedAddress(addr) {
+			return raw, nil, false
+		}
+	}
+	return g.publicURLForTarget(target, info), target, true
 }
 
 func (g *Gateway) publicURLForTarget(target *url.URL, info *targetInfo) string {
-	if g.cfg.DefaultUpstream != nil && sameOrigin(target, g.cfg.DefaultUpstream) {
-		if path, ok := stripBasePath(target.Path, g.cfg.DefaultUpstream.Path); ok {
+	defaultUpstream := g.liveRuntime().DefaultUpstream
+	if info != nil && info.DefaultUpstream != nil {
+		defaultUpstream = info.DefaultUpstream
+	}
+	if defaultUpstream != nil && sameOrigin(target, defaultUpstream) {
+		if path, ok := stripBasePath(target.EscapedPath(), defaultUpstream.EscapedPath()); ok {
 			publicURL := strings.TrimRight(info.PublicBase, "/") + path
 			if target.RawQuery != "" {
 				publicURL += "?" + target.RawQuery
@@ -134,7 +213,7 @@ func (g *Gateway) publicURLForTarget(target *url.URL, info *targetInfo) string {
 func (g *Gateway) signedDynamicURL(target *url.URL, publicBase string) string {
 	copyURL := *target
 	copyURL.Fragment = ""
-	expires, signature := g.signer.Sign(&copyURL)
+	expires, signature := g.liveSigner().Sign(&copyURL)
 	path := copyURL.EscapedPath()
 	if path == "" {
 		path = "/"
@@ -203,7 +282,12 @@ func (g *Gateway) rewriteCookies(headers http.Header) {
 		if len(parts) == 0 {
 			continue
 		}
-		rewritten := []string{strings.TrimSpace(parts[0])}
+		cookiePair := strings.TrimSpace(parts[0])
+		cookieName, _, _ := strings.Cut(cookiePair, "=")
+		if strings.EqualFold(strings.TrimSpace(cookieName), adminCookieName) {
+			continue
+		}
+		rewritten := []string{cookiePair}
 		hasPath := false
 		for _, part := range parts[1:] {
 			part = strings.TrimSpace(part)
@@ -248,6 +332,9 @@ func (g *Gateway) rewriteJSON(body []byte, info *targetInfo) ([]byte, error) {
 	var value any
 	if err := decoder.Decode(&value); err != nil {
 		return nil, err
+	}
+	if g.playback != nil && info != nil {
+		g.playback.ObserveJSONResponse(info.PlaybackMeta, value)
 	}
 	rewritten, _ := g.rewriteJSONValue(value, "", info)
 	return json.Marshal(rewritten)
@@ -311,9 +398,14 @@ func (g *Gateway) rewriteHLS(body string, info *targetInfo) string {
 				}
 				quoted := strings.HasPrefix(strings.TrimSpace(parts[1]), `"`)
 				value := strings.Trim(strings.TrimSpace(parts[1]), `"`)
-				rewritten, ok := g.rewriteReference(value, info.URL, info)
+				rewritten, resolvedTarget, ok := g.rewriteReferenceWithTarget(value, info.URL, info)
 				if !ok {
 					return match
+				}
+				if g.playback != nil && info != nil {
+					if _, isDirectStream, _ := extractEmbyItemIDFromPath(resolvedTarget.EscapedPath()); !(isDirectStream && sameOrigin(resolvedTarget, info.URL)) {
+						g.playback.ObserveStreamRedirect(info.PlaybackMeta, resolvedTarget)
+					}
 				}
 				if quoted {
 					return parts[0] + `="` + rewritten + `"`
@@ -321,7 +413,12 @@ func (g *Gateway) rewriteHLS(body string, info *targetInfo) string {
 				return parts[0] + "=" + rewritten
 			})
 		default:
-			if rewritten, ok := g.rewriteReference(trimmed, info.URL, info); ok {
+			if rewritten, resolvedTarget, ok := g.rewriteReferenceWithTarget(trimmed, info.URL, info); ok {
+				if g.playback != nil && info != nil {
+					if _, isDirectStream, _ := extractEmbyItemIDFromPath(resolvedTarget.EscapedPath()); !(isDirectStream && sameOrigin(resolvedTarget, info.URL)) {
+						g.playback.ObserveStreamRedirect(info.PlaybackMeta, resolvedTarget)
+					}
+				}
 				content = rewritten
 			}
 		}

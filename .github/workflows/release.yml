@@ -107,14 +107,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          prerelease_flag=()
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            prerelease_flag=(--prerelease)
+          fi
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" release/* --clobber
             gh release edit "${GITHUB_REF_NAME}" \
+              "${prerelease_flag[@]}" \
               --title "Refract ${GITHUB_REF_NAME}" \
               --notes-file release-notes.md
           else
             gh release create "${GITHUB_REF_NAME}" release/* \
               --verify-tag \
+              "${prerelease_flag[@]}" \
               --title "Refract ${GITHUB_REF_NAME}" \
               --notes-file release-notes.md
           fi

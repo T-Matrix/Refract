@@ -24,6 +24,7 @@ const (
 )
 
 type telemetryEvent struct {
+	NodeID     string
 	FlowID     string
 	Timestamp  time.Time
 	ClientIP   string
@@ -43,7 +44,11 @@ type telemetryEvent struct {
 
 type requestLog struct {
 	ID             int64  `json:"id"`
+	NodeID         string `json:"node_id,omitempty"`
+	NodeName       string `json:"node_name,omitempty"`
 	Timestamp      int64  `json:"timestamp"`
+	ClientIP       string `json:"client_ip,omitempty"`
+	Location       string `json:"location,omitempty"`
 	Host           string `json:"host"`
 	Scheme         string `json:"scheme"`
 	EmbyServerName string `json:"emby_server_name,omitempty"`
@@ -127,6 +132,7 @@ type telemetryStore struct {
 	closeOnce sync.Once
 	dropped   atomic.Uint64
 	pendingMu sync.Mutex
+	closed    bool
 	pending   []telemetryEvent
 }
 
@@ -157,7 +163,8 @@ func openTelemetryStore(path, username, passwordHash string) (*telemetryStore, e
 			duration_ms INTEGER NOT NULL,
 			device_id TEXT NOT NULL DEFAULT '',
 			device_name TEXT NOT NULL DEFAULT '',
-			client_name TEXT NOT NULL DEFAULT ''
+			client_name TEXT NOT NULL DEFAULT '',
+			client_ip TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_request_logs_timestamp ON request_logs(timestamp DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_request_logs_host_timestamp ON request_logs(host, timestamp DESC)`,
@@ -279,6 +286,153 @@ func openTelemetryStore(path, username, passwordHash string) (*telemetryStore, e
 			last_seen INTEGER NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_admin_login_attempts_last_seen ON admin_login_attempts(last_seen ASC)`,
+		`CREATE TABLE IF NOT EXISTS edge_nodes (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			group_name TEXT NOT NULL DEFAULT '',
+			region TEXT NOT NULL DEFAULT '',
+			public_url TEXT NOT NULL,
+			public_visible INTEGER NOT NULL DEFAULT 1 CHECK(public_visible IN (0,1)),
+			draining INTEGER NOT NULL DEFAULT 0 CHECK(draining IN (0,1)),
+			token_hash TEXT NOT NULL DEFAULT '',
+			enroll_token_hash TEXT NOT NULL DEFAULT '',
+			enroll_expires_at INTEGER NOT NULL DEFAULT 0,
+			overrides_json TEXT NOT NULL DEFAULT '{}',
+			applied_revision INTEGER NOT NULL DEFAULT 0,
+			applied_sha256 TEXT NOT NULL DEFAULT '',
+			agent_version TEXT NOT NULL DEFAULT '',
+			arch TEXT NOT NULL DEFAULT '',
+			hostname TEXT NOT NULL DEFAULT '',
+			public_ipv4 TEXT NOT NULL DEFAULT '',
+			public_ipv6 TEXT NOT NULL DEFAULT '',
+			manual_ipv4 TEXT NOT NULL DEFAULT '',
+			manual_ipv6 TEXT NOT NULL DEFAULT '',
+			dns_sync_enabled INTEGER NOT NULL DEFAULT 0,
+			dns_ip_mode TEXT NOT NULL DEFAULT 'auto',
+			monthly_quota_gb REAL NOT NULL DEFAULT 0,
+			quota_reset_day INTEGER NOT NULL DEFAULT 1,
+			quota_direction TEXT NOT NULL DEFAULT 'out',
+			quota_auto_drain INTEGER NOT NULL DEFAULT 1,
+			quota_auto_drained INTEGER NOT NULL DEFAULT 0,
+			quota_cycle_key TEXT NOT NULL DEFAULT '',
+			quota_alert_level INTEGER NOT NULL DEFAULT 0,
+			binary_sha256 TEXT NOT NULL DEFAULT '',
+			last_seen_at INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS node_traffic_minutes (
+			minute INTEGER NOT NULL,
+			node_id TEXT NOT NULL,
+			host TEXT NOT NULL,
+			requests INTEGER NOT NULL,
+			bytes_in INTEGER NOT NULL,
+			bytes_out INTEGER NOT NULL,
+			errors INTEGER NOT NULL,
+			duration_ms INTEGER NOT NULL,
+			PRIMARY KEY (minute, node_id, host)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_node_traffic_minutes_node ON node_traffic_minutes(node_id, minute DESC)`,
+		`CREATE TABLE IF NOT EXISTS node_nic_traffic_minutes (
+			minute INTEGER NOT NULL,
+			node_id TEXT NOT NULL,
+			ifaces TEXT NOT NULL DEFAULT '',
+			rx_bytes INTEGER NOT NULL DEFAULT 0,
+			tx_bytes INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (minute, node_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_node_nic_traffic_minutes_node ON node_nic_traffic_minutes(node_id, minute DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_node_nic_traffic_minute ON node_nic_traffic_minutes(minute DESC)`,
+		`CREATE TABLE IF NOT EXISTS node_nic_state (
+			node_id TEXT PRIMARY KEY,
+			boot_id TEXT NOT NULL DEFAULT '',
+			ifaces TEXT NOT NULL DEFAULT '',
+			counters_json TEXT NOT NULL DEFAULT '{}',
+			sampled_at INTEGER NOT NULL DEFAULT 0,
+			updated_at INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE TABLE IF NOT EXISTS edge_domains (
+			id TEXT PRIMARY KEY,
+			domain TEXT NOT NULL UNIQUE COLLATE NOCASE,
+			name TEXT NOT NULL DEFAULT '',
+			note TEXT NOT NULL DEFAULT '',
+			enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+			public_visible INTEGER NOT NULL DEFAULT 1 CHECK(public_visible IN (0,1)),
+			node_ids_json TEXT NOT NULL DEFAULT '[]',
+			dns_mode TEXT NOT NULL DEFAULT 'manual',
+			dns_ip_mode TEXT NOT NULL DEFAULT 'auto',
+			dns_proxied TEXT NOT NULL DEFAULT 'inherit',
+			dns_active_node_id TEXT NOT NULL DEFAULT '',
+			dns_last_sync_at INTEGER NOT NULL DEFAULT 0,
+			dns_last_error TEXT NOT NULL DEFAULT '',
+			tls_mode TEXT NOT NULL DEFAULT 'auto',
+			cert_pem TEXT NOT NULL DEFAULT '',
+			key_pem_enc TEXT NOT NULL DEFAULT '',
+			cert_issuer TEXT NOT NULL DEFAULT '',
+			cert_not_after INTEGER NOT NULL DEFAULT 0,
+			cert_status TEXT NOT NULL DEFAULT 'idle',
+			cert_error TEXT NOT NULL DEFAULT '',
+			cert_updated_at INTEGER NOT NULL DEFAULT 0,
+			overrides_json TEXT NOT NULL DEFAULT '{}',
+			node_limits_json TEXT NOT NULL DEFAULT '{}',
+			waf_rule_ids_json TEXT NOT NULL DEFAULT '[]',
+			smart_dns_json TEXT NOT NULL DEFAULT '{}',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_edge_domains_domain ON edge_domains(domain COLLATE NOCASE)`,
+		`CREATE TABLE IF NOT EXISTS waf_rules (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+			is_global INTEGER NOT NULL DEFAULT 0 CHECK(is_global IN (0,1)),
+			graph_json TEXT NOT NULL DEFAULT '{}',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS smart_dns_profiles (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			provider_uuid TEXT NOT NULL DEFAULT '',
+			provider_source TEXT NOT NULL DEFAULT 'platform',
+			provider_type TEXT NOT NULL DEFAULT '',
+			zone_uuid TEXT NOT NULL DEFAULT '',
+			zone_name TEXT NOT NULL DEFAULT '',
+			zone_plan TEXT NOT NULL DEFAULT '',
+			auto_cf_cname INTEGER NOT NULL DEFAULT 1 CHECK(auto_cf_cname IN (0,1)),
+			lines_json TEXT NOT NULL DEFAULT '[]',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_waf_rules_global ON waf_rules(is_global DESC, created_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS watch_history (
+			session_key TEXT PRIMARY KEY,
+			node_id TEXT NOT NULL DEFAULT '',
+			node_name TEXT NOT NULL DEFAULT '',
+			user_name TEXT NOT NULL DEFAULT '',
+			client_ip TEXT NOT NULL DEFAULT '',
+			client_name TEXT NOT NULL DEFAULT '',
+			device_name TEXT NOT NULL DEFAULT '',
+			upstream_host TEXT NOT NULL DEFAULT '',
+			item_id TEXT NOT NULL DEFAULT '',
+			media_type TEXT NOT NULL DEFAULT '',
+			title TEXT NOT NULL DEFAULT '',
+			series_name TEXT NOT NULL DEFAULT '',
+			season_number INTEGER NOT NULL DEFAULT 0,
+			episode_number INTEGER NOT NULL DEFAULT 0,
+			production_year INTEGER NOT NULL DEFAULT 0,
+			video_quality TEXT NOT NULL DEFAULT '',
+			play_method TEXT NOT NULL DEFAULT '',
+			position_sec INTEGER NOT NULL DEFAULT 0,
+			duration_sec INTEGER NOT NULL DEFAULT 0,
+			progress_pct INTEGER NOT NULL DEFAULT 0,
+			bytes_out INTEGER NOT NULL DEFAULT 0,
+			started_at INTEGER NOT NULL DEFAULT 0,
+			last_seen_at INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_watch_history_last_seen ON watch_history(last_seen_at DESC)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
@@ -290,21 +444,74 @@ func openTelemetryStore(path, username, passwordHash string) (*telemetryStore, e
 		"device_id":        "TEXT NOT NULL DEFAULT ''",
 		"device_name":      "TEXT NOT NULL DEFAULT ''",
 		"client_name":      "TEXT NOT NULL DEFAULT ''",
+		"client_ip":        "TEXT NOT NULL DEFAULT ''",
+		"node_id":          "TEXT NOT NULL DEFAULT 'local'",
 		"quota_bytes":      "INTEGER NOT NULL DEFAULT 0 CHECK(quota_bytes >= 0)",
 		"quota_used_bytes": "INTEGER NOT NULL DEFAULT 0 CHECK(quota_used_bytes >= 0)",
 		"line_name":        "TEXT NOT NULL DEFAULT ''",
 		"note":             "TEXT NOT NULL DEFAULT ''",
+		"probe_path":       "TEXT NOT NULL DEFAULT ''",
+		"server_version":   "TEXT NOT NULL DEFAULT ''",
+		"detected_name":    "TEXT NOT NULL DEFAULT ''",
+		"retry_count":      "INTEGER NOT NULL DEFAULT 2",
+		"retry_delay_sec":  "INTEGER NOT NULL DEFAULT 2",
 	} {
 		table := "proxy_rules"
-		if column == "line_name" || column == "note" {
+		if column == "line_name" || column == "note" || column == "probe_path" || column == "server_version" || column == "detected_name" || column == "retry_count" || column == "retry_delay_sec" {
 			table = "monitored_emby_servers"
-		} else if column == "device_id" || column == "device_name" || column == "client_name" {
+		} else if column == "device_id" || column == "device_name" || column == "client_name" || column == "client_ip" || column == "node_id" {
 			table = "request_logs"
 		}
 		if err := ensureSQLiteColumn(db, table, column, definition); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("migrate telemetry schema: %w", err)
 		}
+	}
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_request_logs_client_ip ON request_logs(client_ip, timestamp DESC)`)
+	for column, definition := range map[string]string{
+		"public_ipv4":        "TEXT NOT NULL DEFAULT ''",
+		"public_ipv6":        "TEXT NOT NULL DEFAULT ''",
+		"manual_ipv4":        "TEXT NOT NULL DEFAULT ''",
+		"manual_ipv6":        "TEXT NOT NULL DEFAULT ''",
+		"dns_sync_enabled":   "INTEGER NOT NULL DEFAULT 0",
+		"dns_ip_mode":        "TEXT NOT NULL DEFAULT 'auto'",
+		"monthly_quota_gb":   "REAL NOT NULL DEFAULT 0",
+		"quota_reset_day":    "INTEGER NOT NULL DEFAULT 1",
+		"quota_direction":    "TEXT NOT NULL DEFAULT 'out'",
+		"quota_auto_drain":   "INTEGER NOT NULL DEFAULT 1",
+		"quota_auto_drained": "INTEGER NOT NULL DEFAULT 0",
+		"quota_cycle_key":    "TEXT NOT NULL DEFAULT ''",
+		"quota_alert_level":  "INTEGER NOT NULL DEFAULT 0",
+		"binary_sha256":      "TEXT NOT NULL DEFAULT ''",
+	} {
+		if err := ensureSQLiteColumn(db, "edge_nodes", column, definition); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("migrate edge_nodes schema: %w", err)
+		}
+	}
+	if err := ensureSQLiteColumn(db, "emby_health_checks", "retries_used", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate emby_health_checks schema: %w", err)
+	}
+	if err := ensureSQLiteColumn(db, "edge_domains", "node_limits_json", "TEXT NOT NULL DEFAULT '{}'"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate edge_domains schema: %w", err)
+	}
+	if err := ensureSQLiteColumn(db, "edge_domains", "waf_rule_ids_json", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate edge_domains waf_rule_ids_json: %w", err)
+	}
+	if err := ensureSQLiteColumn(db, "edge_domains", "smart_dns_json", "TEXT NOT NULL DEFAULT '{}'"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate edge_domains smart_dns_json: %w", err)
+	}
+	if err := ensureSQLiteColumn(db, "node_nic_state", "sampled_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate node_nic_state sampled_at: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_request_logs_node_timestamp ON request_logs(node_id, timestamp DESC)`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("index request_logs node_id: %w", err)
 	}
 	if path != ":memory:" && !strings.HasPrefix(path, "file:") {
 		if err := os.Chmod(path, 0600); err != nil {
@@ -374,8 +581,12 @@ func (s *telemetryStore) Close() {
 		return
 	}
 	s.closeOnce.Do(func() {
+		s.pendingMu.Lock()
+		s.closed = true
 		close(s.events)
+		s.pendingMu.Unlock()
 		<-s.done
+		invalidateBrandAvatarCache(s)
 		_ = s.db.Close()
 	})
 }
@@ -390,8 +601,17 @@ func (s *telemetryStore) Record(event telemetryEvent) {
 		return
 	}
 	s.pendingMu.Lock()
-	s.enqueueEventLocked(event)
+	if s.closed {
+		s.pendingMu.Unlock()
+		return
+	}
+	overflow := s.enqueueEventLocked(event)
 	s.pendingMu.Unlock()
+	if overflow {
+		if err := s.writeBatch([]telemetryEvent{event}); err != nil {
+			s.dropped.Add(1)
+		}
+	}
 }
 
 func (s *telemetryStore) RecordCompleted(event telemetryEvent, connections *connectionTracker, flow *connectionFlow) {
@@ -401,15 +621,25 @@ func (s *telemetryStore) RecordCompleted(event telemetryEvent, connections *conn
 	}
 	var valid bool
 	event, valid = s.prepareEvent(event)
+	overflow := false
 	s.pendingMu.Lock()
-	if valid {
-		s.enqueueEventLocked(event)
+	if valid && !s.closed {
+		overflow = s.enqueueEventLocked(event)
 	}
 	connections.Finish(flow)
 	s.pendingMu.Unlock()
+	if overflow {
+		if err := s.writeBatch([]telemetryEvent{event}); err != nil {
+			s.dropped.Add(1)
+		}
+	}
 }
 
 func (s *telemetryStore) prepareEvent(event telemetryEvent) (telemetryEvent, bool) {
+	event.NodeID = truncateRunes(strings.TrimSpace(event.NodeID), 48)
+	if event.NodeID == "" {
+		event.NodeID = "local"
+	}
 	event.Host = strings.TrimSpace(event.Host)
 	event.ClientIP = normalizeTelemetryClientIP(event.ClientIP)
 	event.DeviceID = truncateRunes(strings.TrimSpace(event.DeviceID), 256)
@@ -433,16 +663,14 @@ func (s *telemetryStore) prepareEvent(event telemetryEvent) (telemetryEvent, boo
 	return event, true
 }
 
-func (s *telemetryStore) enqueueEventLocked(event telemetryEvent) {
+func (s *telemetryStore) enqueueEventLocked(event telemetryEvent) bool {
 	select {
 	case s.events <- event:
 		s.pending = append(s.pending, event)
+		return false
 	default:
-		// Preserve accounting under bursts instead of silently dropping a
-		// completed request when the asynchronous queue is temporarily full.
-		if err := s.writeBatch([]telemetryEvent{event}); err != nil {
-			s.dropped.Add(1)
-		}
+		// Signal caller to persist synchronously outside pendingMu so hot-path writers don't stall.
+		return true
 	}
 }
 
@@ -457,16 +685,23 @@ func (s *telemetryStore) runWriter() {
 		if len(batch) == 0 {
 			return
 		}
-		s.pendingMu.Lock()
 		if err := s.writeBatch(batch); err != nil {
 			s.dropped.Add(uint64(len(batch)))
 		}
-		if len(s.pending) >= len(batch) {
-			s.pending = s.pending[len(batch):]
+		n := len(batch)
+		s.pendingMu.Lock()
+		if len(s.pending) >= n {
+			clear(s.pending[:n])
+			s.pending = s.pending[n:]
+			if len(s.pending) == 0 {
+				s.pending = s.pending[:0]
+			}
 		} else {
+			clear(s.pending)
 			s.pending = s.pending[:0]
 		}
 		s.pendingMu.Unlock()
+		clear(batch)
 		batch = batch[:0]
 	}
 	for {
@@ -496,10 +731,15 @@ func (s *telemetryStore) writeBatch(events []telemetryEvent) error {
 	}
 	defer tx.Rollback()
 	for _, event := range events {
+		nodeID := event.NodeID
+		if nodeID == "" {
+			nodeID = "local"
+		}
+		clientIP := normalizeTelemetryClientIP(event.ClientIP)
 		if _, err := tx.Exec(
-			`INSERT INTO request_logs(timestamp,host,scheme,method,path,category,status,bytes_in,bytes_out,duration_ms,device_id,device_name,client_name)
-			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			event.Timestamp.Unix(), event.Host, event.Scheme, event.Method, event.Path, event.Category,
+			`INSERT INTO request_logs(node_id,timestamp,client_ip,host,scheme,method,path,category,status,bytes_in,bytes_out,duration_ms,device_id,device_name,client_name)
+			 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			nodeID, event.Timestamp.Unix(), clientIP, event.Host, event.Scheme, event.Method, event.Path, event.Category,
 			event.Status, event.BytesIn, event.BytesOut, event.DurationMS, event.DeviceID, event.DeviceName, event.ClientName,
 		); err != nil {
 			return err
@@ -516,6 +756,16 @@ func (s *telemetryStore) writeBatch(events []telemetryEvent) error {
 			 requests=requests+1, bytes_in=bytes_in+excluded.bytes_in, bytes_out=bytes_out+excluded.bytes_out,
 			 errors=errors+excluded.errors, duration_ms=duration_ms+excluded.duration_ms`,
 			minute, event.Host, event.BytesIn, event.BytesOut, errorsCount, event.DurationMS,
+		); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO node_traffic_minutes(minute,node_id,host,requests,bytes_in,bytes_out,errors,duration_ms)
+			 VALUES(?,?,?,1,?,?,?,?)
+			 ON CONFLICT(minute,node_id,host) DO UPDATE SET
+			 requests=requests+1, bytes_in=bytes_in+excluded.bytes_in, bytes_out=bytes_out+excluded.bytes_out,
+			 errors=errors+excluded.errors, duration_ms=duration_ms+excluded.duration_ms`,
+			minute, nodeID, event.Host, event.BytesIn, event.BytesOut, errorsCount, event.DurationMS,
 		); err != nil {
 			return err
 		}
@@ -555,9 +805,17 @@ func (s *telemetryStore) cleanup() {
 	_, _ = s.db.Exec(`DELETE FROM request_logs WHERE timestamp < ?`, cutoff)
 	_, _ = s.db.Exec(`DELETE FROM request_logs WHERE id NOT IN (SELECT id FROM request_logs ORDER BY id DESC LIMIT ?)`, requestLogLimit)
 	_, _ = s.db.Exec(`DELETE FROM traffic_minutes WHERE minute < ?`, trafficCutoff)
+	_, _ = s.db.Exec(`DELETE FROM traffic_minutes WHERE rowid NOT IN (SELECT rowid FROM traffic_minutes ORDER BY minute DESC LIMIT 200000)`)
+	_, _ = s.db.Exec(`DELETE FROM node_traffic_minutes WHERE minute < ?`, trafficCutoff)
+	_, _ = s.db.Exec(`DELETE FROM node_traffic_minutes WHERE rowid NOT IN (SELECT rowid FROM node_traffic_minutes ORDER BY minute DESC LIMIT 200000)`)
+	_, _ = s.db.Exec(`DELETE FROM node_nic_traffic_minutes WHERE minute < ?`, trafficCutoff)
 	_, _ = s.db.Exec(`DELETE FROM client_geo_hours WHERE hour < ?`, trafficCutoff)
+	_, _ = s.db.Exec(`DELETE FROM client_geo_hours WHERE rowid NOT IN (SELECT rowid FROM client_geo_hours ORDER BY hour DESC LIMIT 100000)`)
 	_, _ = s.db.Exec(`DELETE FROM geo_ip_cache WHERE looked_up < ? AND ip NOT IN (SELECT DISTINCT ip FROM client_geo_hours)`, time.Now().Add(-90*24*time.Hour).Unix())
+	_, _ = s.db.Exec(`DELETE FROM geo_ip_cache WHERE rowid NOT IN (SELECT rowid FROM geo_ip_cache ORDER BY looked_up DESC LIMIT 50000)`)
 	_, _ = s.db.Exec(`DELETE FROM audit_logs WHERE timestamp < ?`, time.Now().Add(-auditLogTTL).Unix())
+	_, _ = s.db.Exec(`DELETE FROM audit_logs WHERE id NOT IN (SELECT id FROM audit_logs ORDER BY id DESC LIMIT 20000)`)
+	_, _ = s.db.Exec(`DELETE FROM watch_history WHERE last_seen_at < ?`, time.Now().Add(-playbackHistoryRetention).Unix())
 }
 
 func (s *telemetryStore) recordClientGeo(event clientGeoEvent) error {
@@ -767,10 +1025,16 @@ func (s *telemetryStore) ChangePassword(ctx context.Context, username, passwordH
 }
 
 func (s *telemetryStore) Snapshot(ctx context.Context, period time.Duration, active int64, blocked uint64, uptime time.Duration, connections *connectionTracker) (dashboardSnapshot, error) {
-	s.pendingMu.Lock()
-	defer s.pendingMu.Unlock()
+	return s.SnapshotForNode(ctx, period, "", active, blocked, uptime, connections.Snapshot())
+}
+
+func (s *telemetryStore) SnapshotForNode(ctx context.Context, period time.Duration, nodeID string, active int64, blocked uint64, uptime time.Duration, activeConns []connectionSnapshot) (dashboardSnapshot, error) {
 	if period != 24*time.Hour && period != 7*24*time.Hour && period != 30*24*time.Hour {
 		period = 24 * time.Hour
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "all" {
+		nodeID = ""
 	}
 	since := time.Now().Add(-period).Unix()
 	bucket := int64(time.Hour / time.Second)
@@ -788,17 +1052,35 @@ func (s *telemetryStore) Snapshot(ctx context.Context, period time.Duration, act
 		Targets:        []targetSummary{},
 		Recent:         []requestLog{},
 	}
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(requests),0), COALESCE(SUM(bytes_in),0), COALESCE(SUM(bytes_out),0), COALESCE(SUM(errors),0), COUNT(DISTINCT host)
-		 FROM traffic_minutes WHERE minute>=?`, since,
-	).Scan(&snapshot.Requests24H, &snapshot.BytesIn24H, &snapshot.BytesOut24H, &snapshot.Errors24H, &snapshot.Targets24H); err != nil {
+	var err error
+	if nodeID == "" {
+		err = s.db.QueryRowContext(ctx,
+			`SELECT COALESCE(SUM(requests),0), COALESCE(SUM(bytes_in),0), COALESCE(SUM(bytes_out),0), COALESCE(SUM(errors),0), COUNT(DISTINCT host)
+			 FROM traffic_minutes WHERE minute>=?`, since,
+		).Scan(&snapshot.Requests24H, &snapshot.BytesIn24H, &snapshot.BytesOut24H, &snapshot.Errors24H, &snapshot.Targets24H)
+	} else {
+		err = s.db.QueryRowContext(ctx,
+			`SELECT COALESCE(SUM(requests),0), COALESCE(SUM(bytes_in),0), COALESCE(SUM(bytes_out),0), COALESCE(SUM(errors),0), COUNT(DISTINCT host)
+			 FROM node_traffic_minutes WHERE node_id=? AND minute>=?`, nodeID, since,
+		).Scan(&snapshot.Requests24H, &snapshot.BytesIn24H, &snapshot.BytesOut24H, &snapshot.Errors24H, &snapshot.Targets24H)
+	}
+	if err != nil {
 		return dashboardSnapshot{}, err
 	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT (minute/?)*?, SUM(requests), SUM(bytes_in), SUM(bytes_out), SUM(errors)
-		 FROM traffic_minutes WHERE minute>=? GROUP BY (minute/?) ORDER BY (minute/?)`,
-		bucket, bucket, since, bucket, bucket,
-	)
+	var rows *sql.Rows
+	if nodeID == "" {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT (minute/?)*?, SUM(requests), SUM(bytes_in), SUM(bytes_out), SUM(errors)
+			 FROM traffic_minutes WHERE minute>=? GROUP BY (minute/?) ORDER BY (minute/?)`,
+			bucket, bucket, since, bucket, bucket,
+		)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT (minute/?)*?, SUM(requests), SUM(bytes_in), SUM(bytes_out), SUM(errors)
+			 FROM node_traffic_minutes WHERE node_id=? AND minute>=? GROUP BY (minute/?) ORDER BY (minute/?)`,
+			bucket, bucket, nodeID, since, bucket, bucket,
+		)
+	}
 	if err != nil {
 		return dashboardSnapshot{}, err
 	}
@@ -813,13 +1095,26 @@ func (s *telemetryStore) Snapshot(ctx context.Context, period time.Duration, act
 	if err := rows.Close(); err != nil {
 		return dashboardSnapshot{}, err
 	}
-	snapshot.Targets, err = s.targets(ctx, since, 20)
+	snapshot.Targets, err = s.targetsForNode(ctx, since, 20, nodeID)
 	if err != nil {
 		return dashboardSnapshot{}, err
 	}
-	snapshot.Recent, err = s.recent(ctx, 20, "")
+	snapshot.Recent, err = s.recentForNode(ctx, 20, "", nodeID)
 	if err == nil {
-		mergeRealtimeDashboard(&snapshot, since, bucket, s.pending, connections.Snapshot())
+		s.pendingMu.Lock()
+		var pending []telemetryEvent
+		if nodeID == "" {
+			pending = append([]telemetryEvent(nil), s.pending...)
+		} else {
+			pending = make([]telemetryEvent, 0, len(s.pending))
+			for _, ev := range s.pending {
+				if ev.NodeID == nodeID {
+					pending = append(pending, ev)
+				}
+			}
+		}
+		s.pendingMu.Unlock()
+		mergeRealtimeDashboard(&snapshot, since, bucket, pending, activeConns)
 	}
 	return snapshot, err
 }
@@ -915,11 +1210,25 @@ func mergeRealtimeDashboard(snapshot *dashboardSnapshot, since, bucketSeconds in
 }
 
 func (s *telemetryStore) targets(ctx context.Context, since int64, limit int) ([]targetSummary, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT host, SUM(requests), SUM(bytes_out), SUM(errors),
-		 CASE WHEN SUM(requests)>0 THEN SUM(duration_ms)/SUM(requests) ELSE 0 END, MAX(minute)
-		 FROM traffic_minutes WHERE minute>=? GROUP BY host ORDER BY SUM(bytes_out) DESC LIMIT ?`, since, limit,
-	)
+	return s.targetsForNode(ctx, since, limit, "")
+}
+
+func (s *telemetryStore) targetsForNode(ctx context.Context, since int64, limit int, nodeID string) ([]targetSummary, error) {
+	var rows *sql.Rows
+	var err error
+	if nodeID == "" {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT host, SUM(requests), SUM(bytes_out), SUM(errors),
+			 CASE WHEN SUM(requests)>0 THEN SUM(duration_ms)/SUM(requests) ELSE 0 END, MAX(minute)
+			 FROM traffic_minutes WHERE minute>=? GROUP BY host ORDER BY SUM(bytes_out) DESC LIMIT ?`, since, limit,
+		)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT host, SUM(requests), SUM(bytes_out), SUM(errors),
+			 CASE WHEN SUM(requests)>0 THEN SUM(duration_ms)/SUM(requests) ELSE 0 END, MAX(minute)
+			 FROM node_traffic_minutes WHERE node_id=? AND minute>=? GROUP BY host ORDER BY SUM(bytes_out) DESC LIMIT ?`, nodeID, since, limit,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -945,14 +1254,26 @@ func targetDomain(host string) string {
 }
 
 func (s *telemetryStore) recent(ctx context.Context, limit int, host string) ([]requestLog, error) {
+	return s.recentForNode(ctx, limit, host, "")
+}
+
+func (s *telemetryStore) recentForNode(ctx context.Context, limit int, host, nodeID string) ([]requestLog, error) {
 	if limit < 1 || limit > 200 {
 		limit = 50
 	}
-	query := `SELECT id,timestamp,host,scheme,device_id,device_name,client_name,method,path,category,status,bytes_in,bytes_out,duration_ms FROM request_logs`
-	args := make([]any, 0, 2)
+	query := `SELECT id,node_id,timestamp,client_ip,host,scheme,device_id,device_name,client_name,method,path,category,status,bytes_in,bytes_out,duration_ms FROM request_logs`
+	args := make([]any, 0, 3)
+	var clauses []string
 	if host = strings.TrimSpace(host); host != "" {
-		query += ` WHERE host=?`
+		clauses = append(clauses, `host=?`)
 		args = append(args, host)
+	}
+	if nodeID = strings.TrimSpace(nodeID); nodeID != "" && nodeID != "all" {
+		clauses = append(clauses, `node_id=?`)
+		args = append(args, nodeID)
+	}
+	if len(clauses) > 0 {
+		query += ` WHERE ` + strings.Join(clauses, ` AND `)
 	}
 	query += ` ORDER BY id DESC LIMIT ?`
 	args = append(args, limit)
@@ -964,7 +1285,7 @@ func (s *telemetryStore) recent(ctx context.Context, limit int, host string) ([]
 	result := make([]requestLog, 0, limit)
 	for rows.Next() {
 		var item requestLog
-		if err := rows.Scan(&item.ID, &item.Timestamp, &item.Host, &item.Scheme, &item.DeviceID, &item.DeviceName, &item.ClientName, &item.Method, &item.Path, &item.Category,
+		if err := rows.Scan(&item.ID, &item.NodeID, &item.Timestamp, &item.ClientIP, &item.Host, &item.Scheme, &item.DeviceID, &item.DeviceName, &item.ClientName, &item.Method, &item.Path, &item.Category,
 			&item.Status, &item.BytesIn, &item.BytesOut, &item.DurationMS); err != nil {
 			return nil, err
 		}
@@ -974,6 +1295,10 @@ func (s *telemetryStore) recent(ctx context.Context, limit int, host string) ([]
 }
 
 func (s *telemetryStore) requestLogPage(ctx context.Context, page, pageSize int, host string, status *int) (requestLogPage, error) {
+	return s.requestLogPageForNode(ctx, page, pageSize, host, "", "", status)
+}
+
+func (s *telemetryStore) requestLogPageForNode(ctx context.Context, page, pageSize int, host, nodeID, clientIP string, status *int) (requestLogPage, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -981,12 +1306,30 @@ func (s *telemetryStore) requestLogPage(ctx context.Context, page, pageSize int,
 		pageSize = 20
 	}
 	host = strings.TrimSpace(host)
+	nodeID = strings.TrimSpace(nodeID)
+	clientIP = strings.TrimSpace(clientIP)
+	if nodeID == "all" {
+		nodeID = ""
+	}
 
-	statusQuery := `SELECT status,COUNT(*) FROM request_logs`
-	statusArgs := make([]any, 0, 1)
+	statusClauses := make([]string, 0, 3)
+	statusArgs := make([]any, 0, 3)
 	if host != "" {
-		statusQuery += ` WHERE host=?`
+		statusClauses = append(statusClauses, `host=?`)
 		statusArgs = append(statusArgs, host)
+	}
+	if nodeID != "" {
+		statusClauses = append(statusClauses, `node_id=?`)
+		statusArgs = append(statusArgs, nodeID)
+	}
+	if clientIP != "" {
+		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(clientIP)
+		statusClauses = append(statusClauses, `client_ip LIKE ? ESCAPE '\'`)
+		statusArgs = append(statusArgs, escaped+"%")
+	}
+	statusQuery := `SELECT status,COUNT(*) FROM request_logs`
+	if len(statusClauses) > 0 {
+		statusQuery += ` WHERE ` + strings.Join(statusClauses, ` AND `)
 	}
 	statusQuery += ` GROUP BY status ORDER BY status`
 	statusRows, err := s.db.QueryContext(ctx, statusQuery, statusArgs...)
@@ -1009,19 +1352,15 @@ func (s *telemetryStore) requestLogPage(ctx context.Context, page, pageSize int,
 		return requestLogPage{}, err
 	}
 
-	where := ""
-	args := make([]any, 0, 4)
-	if host != "" {
-		where = ` WHERE host=?`
-		args = append(args, host)
-	}
+	clauses := append([]string(nil), statusClauses...)
+	args := append([]any(nil), statusArgs...)
 	if status != nil {
-		if where == "" {
-			where = ` WHERE status=?`
-		} else {
-			where += ` AND status=?`
-		}
+		clauses = append(clauses, `status=?`)
 		args = append(args, *status)
+	}
+	where := ""
+	if len(clauses) > 0 {
+		where = ` WHERE ` + strings.Join(clauses, ` AND `)
 	}
 
 	var total int64
@@ -1032,7 +1371,7 @@ func (s *telemetryStore) requestLogPage(ctx context.Context, page, pageSize int,
 	page = min(page, totalPages)
 	offset := (page - 1) * pageSize
 
-	query := `SELECT id,timestamp,host,scheme,device_id,device_name,client_name,method,path,category,status,bytes_in,bytes_out,duration_ms FROM request_logs` +
+	query := `SELECT id,node_id,timestamp,client_ip,host,scheme,device_id,device_name,client_name,method,path,category,status,bytes_in,bytes_out,duration_ms FROM request_logs` +
 		where + ` ORDER BY id DESC LIMIT ? OFFSET ?`
 	queryArgs := append(append([]any(nil), args...), pageSize, offset)
 	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
@@ -1043,7 +1382,7 @@ func (s *telemetryStore) requestLogPage(ctx context.Context, page, pageSize int,
 	logs := make([]requestLog, 0, pageSize)
 	for rows.Next() {
 		var item requestLog
-		if err := rows.Scan(&item.ID, &item.Timestamp, &item.Host, &item.Scheme, &item.DeviceID, &item.DeviceName, &item.ClientName, &item.Method, &item.Path, &item.Category,
+		if err := rows.Scan(&item.ID, &item.NodeID, &item.Timestamp, &item.ClientIP, &item.Host, &item.Scheme, &item.DeviceID, &item.DeviceName, &item.ClientName, &item.Method, &item.Path, &item.Category,
 			&item.Status, &item.BytesIn, &item.BytesOut, &item.DurationMS); err != nil {
 			return requestLogPage{}, err
 		}
@@ -1055,4 +1394,59 @@ func (s *telemetryStore) requestLogPage(ctx context.Context, page, pageSize int,
 	return requestLogPage{
 		Logs: logs, Statuses: statuses, Total: total, Page: page, PageSize: pageSize, TotalPages: totalPages,
 	}, nil
+}
+
+func (s *telemetryStore) EnrichRequestLogLocations(ctx context.Context, logs []requestLog) {
+	if s == nil || len(logs) == 0 {
+		return
+	}
+	unique := make(map[string]struct{}, len(logs))
+	for _, item := range logs {
+		if item.ClientIP != "" && item.ClientIP != "unknown" {
+			unique[item.ClientIP] = struct{}{}
+		}
+	}
+	if len(unique) == 0 {
+		return
+	}
+	args := make([]any, 0, len(unique))
+	ph := make([]string, 0, len(unique))
+	for ip := range unique {
+		args = append(args, ip)
+		ph = append(ph, "?")
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT ip,country,country_code,region FROM geo_ip_cache WHERE ip IN (`+strings.Join(ph, ",")+`)`, args...)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	locs := make(map[string]string, len(unique))
+	for rows.Next() {
+		var ip, country, code, region string
+		if rows.Scan(&ip, &country, &code, &region) == nil && code != "" {
+			_, _, label, _ := geographyRegion(country, code, region)
+			locs[ip] = label
+		}
+	}
+	for i := range logs {
+		if loc := locs[logs[i].ClientIP]; loc != "" {
+			logs[i].Location = loc
+		}
+	}
+}
+
+func decorateRequestLogNodes(logs []requestLog, names map[string]string) {
+	for i := range logs {
+		if logs[i].NodeID == "" || logs[i].NodeID == "local" {
+			logs[i].NodeID = "local"
+			logs[i].NodeName = "本机节点"
+			continue
+		}
+		if name := names[logs[i].NodeID]; name != "" {
+			logs[i].NodeName = name
+		} else {
+			logs[i].NodeName = logs[i].NodeID
+		}
+	}
 }

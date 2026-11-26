@@ -138,6 +138,23 @@ func TestAdminLoginRejectsCrossOriginAndIssuesSecureSession(t *testing.T) {
 	}
 }
 
+func TestAdminPanelBootDoesNotWaitForOptionalScripts(t *testing.T) {
+	gateway := newAdminTestGateway(t)
+	panel := adminRequest(t, gateway, http.MethodGet, "/panel", nil, loginAdmin(t, gateway), false)
+	if panel.Code != http.StatusOK {
+		t.Fatalf("authenticated panel status=%d", panel.Code)
+	}
+	html := panel.Body.String()
+	if strings.Count(html, "<script") != 1 || !strings.Contains(html, `<script defer src="/_admin/assets/panel.js?`) {
+		t.Fatal("panel boot must depend only on the local entry script")
+	}
+	for _, optionalScript := range []string{"challenges.cloudflare.com", "echarts.min.js", "lucide.min.js"} {
+		if strings.Contains(html, optionalScript) {
+			t.Fatalf("optional resource %q must load independently of panel boot", optionalScript)
+		}
+	}
+}
+
 func TestAdminLoginBlocksOnlyFailingIPFor24Hours(t *testing.T) {
 	gateway := newAdminTestGateway(t)
 	blockedIP := "198.51.100.10"
@@ -172,6 +189,7 @@ func TestAdminClientIPUsesCloudflareAddressWhenProxyHeadersAreTrusted(t *testing
 	request := httptest.NewRequest(http.MethodGet, "https://proxy.test/panel", nil)
 	request.RemoteAddr = "127.0.0.1:12345"
 	request.Header.Set("X-Forwarded-For", "203.0.113.20, 203.0.113.30")
+	request.Header.Set("X-Real-IP", "198.51.100.25")
 	request.Header.Set("CF-Connecting-IP", "198.51.100.20")
 
 	if got := adminClientIP(request, true); got != "198.51.100.20" {
@@ -179,6 +197,34 @@ func TestAdminClientIPUsesCloudflareAddressWhenProxyHeadersAreTrusted(t *testing
 	}
 	if got := adminClientIP(request, false); got != "127.0.0.1" {
 		t.Fatalf("untrusted client IP=%q", got)
+	}
+
+	// Multi-hop X-Real-IP takes precedence over multi-hop X-Forwarded-For CDN peer IP
+	openflareReq := httptest.NewRequest(http.MethodGet, "https://proxy.test/panel", nil)
+	openflareReq.RemoteAddr = "127.0.0.1:12345"
+	openflareReq.Header.Set("X-Forwarded-For", "198.51.100.25, 198.51.100.12")
+	openflareReq.Header.Set("X-Real-IP", "198.51.100.25")
+	if got := adminClientIP(openflareReq, true); got != "198.51.100.25" {
+		t.Fatalf("openflare X-Real-IP=%q want 198.51.100.25", got)
+	}
+	if got := adminClientIP(openflareReq, false); got != "127.0.0.1" {
+		t.Fatalf("untrusted X-Real-IP=%q want 127.0.0.1", got)
+	}
+}
+
+func TestPanelHTMLInjectsServerRoleClass(t *testing.T) {
+	standalone := newAdminTestGateway(t)
+	sCookie := loginAdmin(t, standalone)
+	sResp := adminRequest(t, standalone, http.MethodGet, "/panel", nil, sCookie, false)
+	if sResp.Code != http.StatusOK || !strings.Contains(sResp.Body.String(), `<body class="panel-page" data-role="standalone">`) || strings.Contains(sResp.Body.String(), `mode-controller`) {
+		t.Fatalf("unexpected standalone /panel body role tag: status=%d", sResp.Code)
+	}
+
+	controller := newControllerTestGateway(t)
+	cCookie := loginAdmin(t, controller)
+	cResp := adminRequest(t, controller, http.MethodGet, "/panel", nil, cCookie, false)
+	if cResp.Code != http.StatusOK || !strings.Contains(cResp.Body.String(), `<body class="panel-page mode-controller" data-role="controller">`) {
+		t.Fatalf("expected mode-controller injected into controller /panel HTML, got status=%d", cResp.Code)
 	}
 }
 
@@ -223,5 +269,93 @@ func TestTelemetryNeverStoresQueryParameters(t *testing.T) {
 			t.Fatal("telemetry event was not persisted")
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestRequestLogsClientIPStorageFilterAndGeo(t *testing.T) {
+	gateway := newAdminTestGateway(t)
+	cookie := loginAdmin(t, gateway)
+	now := time.Now()
+
+	gateway.telemetry.Record(telemetryEvent{
+		Timestamp: now.Add(-2 * time.Second), ClientIP: "203.0.113.102", Host: "emby.example", Scheme: "https",
+		Method: http.MethodGet, Path: "/Videos/1/stream", Category: "stream", Status: http.StatusOK,
+		BytesOut: 2048, DurationMS: 18, ClientName: "SenPlayer",
+	})
+	gateway.telemetry.Record(telemetryEvent{
+		Timestamp: now.Add(-1 * time.Second), ClientIP: "198.51.100.12", Host: "emby.example", Scheme: "https",
+		Method: http.MethodGet, Path: "/Videos/2/stream", Category: "stream", Status: http.StatusForbidden,
+		BytesOut: 128, DurationMS: 4, ClientName: "Chrome",
+	})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		logs, err := gateway.telemetry.recent(context.Background(), 10, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(logs) >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("telemetry events were not persisted")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if _, err := gateway.telemetry.db.Exec(
+		`INSERT OR REPLACE INTO geo_ip_cache(ip, country, country_code, region, latitude, longitude, looked_up) VALUES(?,?,?,?,?,?,?)`,
+		"203.0.113.102", "China", "CN", "湖南", 28.2, 112.9, now.Unix(),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify /_admin/api/requests returns client_ip and location
+	allRec := adminRequest(t, gateway, http.MethodGet, "/_admin/api/requests?page=1&page_size=20", nil, cookie, false)
+	if allRec.Code != http.StatusOK {
+		t.Fatalf("GET /_admin/api/requests status=%d body=%s", allRec.Code, allRec.Body.String())
+	}
+	var allRes struct {
+		Logs     []requestLog            `json:"logs"`
+		Statuses []requestLogStatusCount `json:"statuses"`
+		Total    int64                   `json:"total"`
+	}
+	if err := json.NewDecoder(allRec.Body).Decode(&allRes); err != nil {
+		t.Fatal(err)
+	}
+	if allRes.Total != 2 || len(allRes.Logs) != 2 {
+		t.Fatalf("expected 2 request logs, got total=%d len=%d", allRes.Total, len(allRes.Logs))
+	}
+	var foundCN bool
+	for _, l := range allRes.Logs {
+		if l.ClientIP == "203.0.113.102" {
+			foundCN = true
+			if l.Location == "" {
+				t.Fatalf("expected geo location for 203.0.113.102, got %+v", l)
+			}
+		}
+	}
+	if !foundCN {
+		t.Fatalf("expected 203.0.113.102 in logs, got %+v", allRes.Logs)
+	}
+
+	// Verify prefix filtering by ?client_ip=203.0.113.
+	filteredRec := adminRequest(t, gateway, http.MethodGet, "/_admin/api/requests?page=1&page_size=20&client_ip=203.0.113.", nil, cookie, false)
+	if filteredRec.Code != http.StatusOK {
+		t.Fatalf("filtered GET /_admin/api/requests status=%d body=%s", filteredRec.Code, filteredRec.Body.String())
+	}
+	var filteredRes struct {
+		Logs     []requestLog            `json:"logs"`
+		Statuses []requestLogStatusCount `json:"statuses"`
+		Total    int64                   `json:"total"`
+	}
+	if err := json.NewDecoder(filteredRec.Body).Decode(&filteredRes); err != nil {
+		t.Fatal(err)
+	}
+	if filteredRes.Total != 1 || len(filteredRes.Logs) != 1 || filteredRes.Logs[0].ClientIP != "203.0.113.102" {
+		t.Fatalf("unexpected prefix filtered logs: %+v", filteredRes)
+	}
+	if len(filteredRes.Statuses) != 1 || filteredRes.Statuses[0].Status != http.StatusOK || filteredRes.Statuses[0].Count != 1 {
+		t.Fatalf("unexpected filtered status counts: %+v", filteredRes.Statuses)
 	}
 }

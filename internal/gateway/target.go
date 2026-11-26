@@ -13,11 +13,17 @@ import (
 )
 
 type targetInfo struct {
-	URL           *url.URL
-	Dynamic       bool
-	PublicBase    string
-	ClientOrigin  string
-	DialAddresses []string
+	URL               *url.URL
+	Dynamic           bool
+	PublicBase        string
+	ClientOrigin      string
+	DialAddresses     []string
+	PassClientIP      *bool
+	DisableCache      *bool
+	DefaultUpstream   *url.URL
+	RewriteMaxBytes   int64
+	PlaybackMeta      playbackRequestMeta
+	PlayingReportBody []byte
 }
 
 type targetContextKey struct{}
@@ -44,7 +50,98 @@ func newSafeResolver(ttl time.Duration, allowPrivate bool) *safeResolver {
 	}
 }
 
+func (r *safeResolver) TTL() time.Duration {
+	if r == nil {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ttl
+}
+
+func (r *safeResolver) SetTTL(ttl time.Duration) {
+	if r == nil || ttl <= 0 {
+		return
+	}
+	now := time.Now()
+	maxExpires := now.Add(ttl)
+	r.mu.Lock()
+	r.ttl = ttl
+	for host, entry := range r.cache {
+		if !now.Before(entry.expires) {
+			delete(r.cache, host)
+		} else if entry.expires.After(maxExpires) {
+			entry.expires = maxExpires
+			r.cache[host] = entry
+		}
+	}
+	r.mu.Unlock()
+}
+
+const (
+	upstreamIPAuto      = "auto"
+	upstreamIPIPv4First = "ipv4_first"
+	upstreamIPIPv4Only  = "ipv4_only"
+	upstreamIPIPv6First = "ipv6_first"
+	upstreamIPIPv6Only  = "ipv6_only"
+)
+
+func normalizeUpstreamIPMode(raw string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", upstreamIPAuto:
+		return upstreamIPAuto, true
+	case upstreamIPIPv4First:
+		return upstreamIPIPv4First, true
+	case upstreamIPIPv4Only:
+		return upstreamIPIPv4Only, true
+	case upstreamIPIPv6First:
+		return upstreamIPIPv6First, true
+	case upstreamIPIPv6Only:
+		return upstreamIPIPv6Only, true
+	default:
+		return "", false
+	}
+}
+
+func orderAddressesByIPMode(addresses []netip.Addr, mode string) ([]netip.Addr, error) {
+	normalized, ok := normalizeUpstreamIPMode(mode)
+	if !ok || normalized == upstreamIPAuto {
+		return addresses, nil
+	}
+	v4 := make([]netip.Addr, 0, len(addresses))
+	v6 := make([]netip.Addr, 0, len(addresses))
+	for _, addr := range addresses {
+		if addr.Is4() {
+			v4 = append(v4, addr)
+		} else {
+			v6 = append(v6, addr)
+		}
+	}
+	switch normalized {
+	case upstreamIPIPv4Only:
+		if len(v4) == 0 {
+			return nil, fmt.Errorf("target host has no IPv4 addresses")
+		}
+		return v4, nil
+	case upstreamIPIPv6Only:
+		if len(v6) == 0 {
+			return nil, fmt.Errorf("target host has no IPv6 addresses")
+		}
+		return v6, nil
+	case upstreamIPIPv4First:
+		return append(v4, v6...), nil
+	case upstreamIPIPv6First:
+		return append(v6, v4...), nil
+	default:
+		return addresses, nil
+	}
+}
+
 func (r *safeResolver) Resolve(ctx context.Context, target *url.URL) ([]string, error) {
+	return r.ResolveWithMode(ctx, target, upstreamIPAuto)
+}
+
+func (r *safeResolver) ResolveWithMode(ctx context.Context, target *url.URL, ipMode string) ([]string, error) {
 	host := normalizeHost(target.Hostname())
 	if host == "" {
 		return nil, fmt.Errorf("target host is required")
@@ -62,8 +159,12 @@ func (r *safeResolver) Resolve(ctx context.Context, target *url.URL) ([]string, 
 	if len(addresses) == 0 {
 		return nil, fmt.Errorf("target host has no addresses")
 	}
-	result := make([]string, 0, len(addresses))
-	for _, address := range addresses {
+	ordered, err := orderAddressesByIPMode(addresses, ipMode)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]string, 0, len(ordered))
+	for _, address := range ordered {
 		if !r.allowPrivate && isBlockedAddress(address) {
 			return nil, fmt.Errorf("private or reserved target is blocked")
 		}
@@ -72,8 +173,17 @@ func (r *safeResolver) Resolve(ctx context.Context, target *url.URL) ([]string, 
 	return result, nil
 }
 
+const safeResolverMaxCacheEntries = 4096
+
 func (r *safeResolver) lookup(ctx context.Context, host string) ([]netip.Addr, error) {
-	if address, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
+	trimmed := strings.Trim(host, "[]")
+	if strings.Contains(trimmed, "%") {
+		return nil, fmt.Errorf("scoped IPv6 zone targets are not allowed")
+	}
+	if address, err := netip.ParseAddr(trimmed); err == nil {
+		if address.Zone() != "" {
+			return nil, fmt.Errorf("scoped IPv6 zone targets are not allowed")
+		}
 		return []netip.Addr{address.Unmap()}, nil
 	}
 
@@ -93,9 +203,31 @@ func (r *safeResolver) lookup(ctx context.Context, host string) ([]netip.Addr, e
 	}
 	addresses := make([]netip.Addr, 0, len(resolved))
 	for _, address := range resolved {
+		if address.Zone() != "" {
+			address = address.WithZone("")
+		}
 		addresses = append(addresses, address.Unmap())
 	}
+	now = time.Now()
 	r.mu.Lock()
+	if len(r.cache) >= safeResolverMaxCacheEntries {
+		for cachedHost, cachedEntry := range r.cache {
+			if !now.Before(cachedEntry.expires) {
+				delete(r.cache, cachedHost)
+			}
+		}
+		if len(r.cache) >= safeResolverMaxCacheEntries {
+			// Evict oldest quarter to bound memory deterministically under random-subdomain floods.
+			toEvict := len(r.cache) - (safeResolverMaxCacheEntries * 3 / 4)
+			for cachedHost := range r.cache {
+				delete(r.cache, cachedHost)
+				toEvict--
+				if toEvict <= 0 {
+					break
+				}
+			}
+		}
+	}
 	r.cache[host] = dnsCacheEntry{addresses: append([]netip.Addr(nil), addresses...), expires: now.Add(r.ttl)}
 	r.mu.Unlock()
 	return addresses, nil
@@ -118,13 +250,24 @@ var blockedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("240.0.0.0/4"),
 	netip.MustParsePrefix("::/128"),
 	netip.MustParsePrefix("::1/128"),
+	netip.MustParsePrefix("::/96"),
+	netip.MustParsePrefix("::ffff:0:0:0/96"),
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("100::/64"),
+	netip.MustParsePrefix("2001::/32"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
 	netip.MustParsePrefix("fc00::/7"),
 	netip.MustParsePrefix("fe80::/10"),
+	netip.MustParsePrefix("fec0::/10"),
 	netip.MustParsePrefix("ff00::/8"),
-	netip.MustParsePrefix("2001:db8::/32"),
 }
 
 func isBlockedAddress(address netip.Addr) bool {
+	if !address.IsValid() || address.Zone() != "" {
+		return true
+	}
 	address = address.Unmap()
 	for _, prefix := range blockedPrefixes {
 		if prefix.Contains(address) {
@@ -278,22 +421,30 @@ func publicBaseForRequest(cfg Config, r *http.Request) (string, error) {
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	host := r.Host
-	if cfg.TrustProxyHeaders {
-		if forwardedScheme := firstForwardedValue(r.Header.Get("X-Forwarded-Proto")); forwardedScheme == "http" || forwardedScheme == "https" {
+	host := strings.TrimSpace(r.Host)
+	if cfg.TrustProxyHeaders && isTrustedProxyPeer(r.RemoteAddr, cfg.TrustedProxyCIDRs) {
+		if forwardedScheme := lastForwardedValue(r.Header.Values("X-Forwarded-Proto")); forwardedScheme == "http" || forwardedScheme == "https" {
 			scheme = forwardedScheme
 		}
-		if forwardedHost := firstForwardedValue(r.Header.Get("X-Forwarded-Host")); forwardedHost != "" {
+		if forwardedHost := lastForwardedValue(r.Header.Values("X-Forwarded-Host")); forwardedHost != "" {
 			host = forwardedHost
 		}
 	}
-	if host == "" || strings.ContainsAny(host, "/\\ 	\r\n") {
+	parsed, err := parseHTTPURL(scheme + "://" + host)
+	if err != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || strings.ContainsAny(host, "/\\?#\"'@,; \t\r\n") {
 		return "", fmt.Errorf("invalid public host")
 	}
-	return scheme + "://" + host, nil
+	return scheme + "://" + parsed.Host, nil
 }
 
-func firstForwardedValue(value string) string {
-	value, _, _ = strings.Cut(value, ",")
-	return strings.ToLower(strings.TrimSpace(value))
+func lastForwardedValue(values []string) string {
+	for i := len(values) - 1; i >= 0; i-- {
+		parts := strings.Split(values[i], ",")
+		for j := len(parts) - 1; j >= 0; j-- {
+			if candidate := strings.ToLower(strings.TrimSpace(parts[j])); candidate != "" {
+				return candidate
+			}
+		}
+	}
+	return ""
 }

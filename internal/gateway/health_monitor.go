@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -16,32 +17,148 @@ import (
 
 const (
 	embyHealthCheckInterval = time.Minute
-	embyHealthProbeTimeout  = 5 * time.Second
+	embyHealthProbeTimeout  = 8 * time.Second
 	embyHealthRetention     = 31 * 24 * time.Hour
 	embyHealthMaxServers    = 200
+	embyHealthHistoryPoints = 100
+	embyHealthDefaultPath   = "/emby/System/Info/Public"
+	embyHealthFallbackPath  = "/System/Info/Public"
+	embyHealthUserAgent     = "Yamby/1.9.10"
+	embyProbeSettingsKey    = "emby_probe_settings"
+	embyHealthDefaultRetry  = 2
+	embyHealthDefaultDelay  = 2
+	embyHealthMaxRetry      = 5
+	embyHealthMaxDelaySec   = 10
+	embyHealthMinTimeoutSec = 3
+	embyHealthMaxTimeoutSec = 15
 )
+
+type embyProbeSettings struct {
+	DefaultRetryCount    int `json:"default_retry_count"`
+	DefaultRetryDelaySec int `json:"default_retry_delay_sec"`
+	ProbeTimeoutSec      int `json:"probe_timeout_sec"`
+}
+
+func defaultEmbyProbeSettings() embyProbeSettings {
+	return embyProbeSettings{
+		DefaultRetryCount:    embyHealthDefaultRetry,
+		DefaultRetryDelaySec: embyHealthDefaultDelay,
+		ProbeTimeoutSec:      int(embyHealthProbeTimeout / time.Second),
+	}
+}
+
+func normalizeEmbyProbeSettings(raw embyProbeSettings) embyProbeSettings {
+	out := raw
+	if out.DefaultRetryCount < 0 {
+		out.DefaultRetryCount = 0
+	} else if out.DefaultRetryCount > embyHealthMaxRetry {
+		out.DefaultRetryCount = embyHealthMaxRetry
+	}
+	if out.DefaultRetryDelaySec < 1 {
+		out.DefaultRetryDelaySec = 1
+	} else if out.DefaultRetryDelaySec > embyHealthMaxDelaySec {
+		out.DefaultRetryDelaySec = embyHealthMaxDelaySec
+	}
+	if out.ProbeTimeoutSec < embyHealthMinTimeoutSec {
+		out.ProbeTimeoutSec = embyHealthMinTimeoutSec
+	} else if out.ProbeTimeoutSec > embyHealthMaxTimeoutSec {
+		out.ProbeTimeoutSec = embyHealthMaxTimeoutSec
+	}
+	return out
+}
+
+func clampEmbyRetry(count, delaySec int) (int, int) {
+	if count < 0 {
+		count = 0
+	} else if count > embyHealthMaxRetry {
+		count = embyHealthMaxRetry
+	}
+	if delaySec < 1 {
+		delaySec = embyHealthDefaultDelay
+	} else if delaySec > embyHealthMaxDelaySec {
+		delaySec = embyHealthMaxDelaySec
+	}
+	return count, delaySec
+}
+
+func (s *telemetryStore) LoadEmbyProbeSettings(ctx context.Context) embyProbeSettings {
+	def := defaultEmbyProbeSettings()
+	if s == nil {
+		return def
+	}
+	var raw string
+	if err := s.db.QueryRowContext(ctx, `SELECT value FROM gateway_settings WHERE key=?`, embyProbeSettingsKey).Scan(&raw); err != nil || strings.TrimSpace(raw) == "" {
+		return def
+	}
+	var parsed embyProbeSettings
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return def
+	}
+	return normalizeEmbyProbeSettings(parsed)
+}
+
+func (s *telemetryStore) SaveEmbyProbeSettings(ctx context.Context, settings embyProbeSettings, applyToAll bool) (embyProbeSettings, error) {
+	clean := normalizeEmbyProbeSettings(settings)
+	data, err := json.Marshal(clean)
+	if err != nil {
+		return clean, err
+	}
+	now := time.Now().Unix()
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO gateway_settings(key,value,updated_at) VALUES(?,?,?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+		embyProbeSettingsKey, string(data), now,
+	); err != nil {
+		return clean, err
+	}
+	if applyToAll {
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE monitored_emby_servers SET retry_count=?, retry_delay_sec=?, updated_at=?`,
+			clean.DefaultRetryCount, clean.DefaultRetryDelaySec, now,
+		); err != nil {
+			return clean, err
+		}
+	}
+	return clean, nil
+}
 
 var errEmbyHealthLimit = errors.New("maximum monitored server count reached")
 var errEmbyHealthDisabled = errors.New("monitored server is disabled")
 
+type embyHealthCheckPoint struct {
+	CheckedAt   int64 `json:"checked_at"`
+	Success     bool  `json:"success"`
+	LatencyMS   int64 `json:"latency_ms"`
+	StatusCode  int   `json:"status_code"`
+	RetriesUsed int   `json:"retries_used"`
+}
+
 type embyHealthServer struct {
-	ID              int64    `json:"id"`
-	GroupName       string   `json:"group_name"`
-	Name            string   `json:"name"`
-	LineName        string   `json:"line_name"`
-	Note            string   `json:"note"`
-	BaseURL         string   `json:"base_url"`
-	Enabled         bool     `json:"enabled"`
-	Status          string   `json:"status"`
-	LatencyMS       int64    `json:"latency_ms"`
-	LastStatusCode  int      `json:"last_status_code"`
-	LastCheckedAt   int64    `json:"last_checked_at"`
-	ConfigVersion   int64    `json:"-"`
-	Availability24H *float64 `json:"availability_24h"`
-	Availability7D  *float64 `json:"availability_7d"`
-	Availability30D *float64 `json:"availability_30d"`
-	CreatedAt       int64    `json:"created_at"`
-	UpdatedAt       int64    `json:"updated_at"`
+	ID                 int64                  `json:"id"`
+	GroupName          string                 `json:"group_name"`
+	Name               string                 `json:"name"`
+	LineName           string                 `json:"line_name"`
+	Note               string                 `json:"note"`
+	BaseURL            string                 `json:"base_url"`
+	ProbePath          string                 `json:"probe_path"`
+	EffectiveProbePath string                 `json:"effective_probe_path"`
+	ServerVersion      string                 `json:"server_version"`
+	DetectedName       string                 `json:"detected_name"`
+	RetryCount         int                    `json:"retry_count"`
+	RetryDelaySec      int                    `json:"retry_delay_sec"`
+	Enabled            bool                   `json:"enabled"`
+	Status             string                 `json:"status"`
+	LatencyMS          int64                  `json:"latency_ms"`
+	AvgLatencyMS       int64                  `json:"avg_latency_ms"`
+	LastStatusCode     int                    `json:"last_status_code"`
+	LastCheckedAt      int64                  `json:"last_checked_at"`
+	ConfigVersion      int64                  `json:"-"`
+	Availability24H    *float64               `json:"availability_24h"`
+	Availability7D     *float64               `json:"availability_7d"`
+	Availability30D    *float64               `json:"availability_30d"`
+	RecentChecks       []embyHealthCheckPoint `json:"recent_checks"`
+	CreatedAt          int64                  `json:"created_at"`
+	UpdatedAt          int64                  `json:"updated_at"`
 }
 
 type publicEmbyHealthServer struct {
@@ -68,10 +185,45 @@ type publicEmbyHealthSnapshot struct {
 }
 
 type embyHealthSample struct {
-	CheckedAt  int64
-	Success    bool
-	LatencyMS  int64
-	StatusCode int
+	CheckedAt     int64
+	Success       bool
+	LatencyMS     int64
+	StatusCode    int
+	RetriesUsed   int
+	ServerVersion string
+	DetectedName  string
+}
+
+func normalizeEmbyProbePath(raw string) (string, error) {
+	path := strings.TrimSpace(raw)
+	if path == "" {
+		return "", nil
+	}
+	if len(path) > 256 || hasControlCharacters(path) || strings.ContainsAny(path, "?# \t") {
+		return "", errors.New("invalid probe path")
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	for _, segment := range strings.Split(path, "/") {
+		if segment == "." || segment == ".." {
+			return "", errors.New("probe path cannot contain dot segments")
+		}
+	}
+	return path, nil
+}
+
+func effectiveEmbyProbePath(baseURL, probePath string) string {
+	if p := strings.TrimSpace(probePath); p != "" {
+		return p
+	}
+	if parsed, err := url.Parse(baseURL); err == nil {
+		cleanBase := strings.TrimRight(strings.ToLower(parsed.Path), "/")
+		if cleanBase == "/emby" || strings.HasSuffix(cleanBase, "/emby") {
+			return embyHealthFallbackPath
+		}
+	}
+	return embyHealthDefaultPath
 }
 
 func normalizeEmbyHealthServer(groupName, name, rawURL string, enabled bool) (embyHealthServer, error) {
@@ -79,11 +231,19 @@ func normalizeEmbyHealthServer(groupName, name, rawURL string, enabled bool) (em
 }
 
 func normalizeEmbyHealthServerDetails(groupName, name, lineName, note, rawURL string, enabled bool) (embyHealthServer, error) {
+	return normalizeEmbyHealthServerFull(groupName, name, lineName, note, rawURL, "", enabled)
+}
+
+func normalizeEmbyHealthServerFull(groupName, name, lineName, note, rawURL, probePath string, enabled bool) (embyHealthServer, error) {
 	groupName = strings.TrimSpace(groupName)
 	name = strings.TrimSpace(name)
 	lineName = strings.TrimSpace(lineName)
 	note = strings.TrimSpace(note)
 	rawURL = strings.TrimSpace(rawURL)
+	cleanProbePath, pathErr := normalizeEmbyProbePath(probePath)
+	if pathErr != nil {
+		return embyHealthServer{}, pathErr
+	}
 	if groupName == "" || len(groupName) > 128 || hasControlCharacters(groupName) {
 		return embyHealthServer{}, errors.New("invalid group name")
 	}
@@ -117,9 +277,12 @@ func normalizeEmbyHealthServerDetails(groupName, name, lineName, note, rawURL st
 	}
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	parsed.RawPath = ""
+	baseStr := strings.TrimRight(parsed.String(), "/")
 	return embyHealthServer{
 		GroupName: groupName, Name: name, LineName: lineName, Note: note,
-		BaseURL: strings.TrimRight(parsed.String(), "/"), Enabled: enabled,
+		BaseURL: baseStr, ProbePath: cleanProbePath, EffectiveProbePath: effectiveEmbyProbePath(baseStr, cleanProbePath),
+		RetryCount: embyHealthDefaultRetry, RetryDelaySec: embyHealthDefaultDelay,
+		Enabled: enabled, RecentChecks: []embyHealthCheckPoint{},
 	}, nil
 }
 
@@ -128,12 +291,13 @@ func hasControlCharacters(value string) bool {
 }
 
 func (s *telemetryStore) SaveEmbyHealthServer(ctx context.Context, server embyHealthServer) (int64, error) {
+	retryCount, retryDelay := clampEmbyRetry(server.RetryCount, server.RetryDelaySec)
 	if server.ID == 0 {
 		now := time.Now().Unix()
 		result, err := s.db.ExecContext(ctx,
-			`INSERT INTO monitored_emby_servers(group_name,name,line_name,note,base_url,enabled,config_version,created_at,updated_at)
-			 SELECT ?,?,?,?,?,?,1,?,? WHERE (SELECT COUNT(*) FROM monitored_emby_servers) < ?`,
-			server.GroupName, server.Name, server.LineName, server.Note, server.BaseURL, server.Enabled, now, now, embyHealthMaxServers)
+			`INSERT INTO monitored_emby_servers(group_name,name,line_name,note,base_url,probe_path,retry_count,retry_delay_sec,enabled,config_version,created_at,updated_at)
+			 SELECT ?,?,?,?,?,?,?,?,?,1,?,? WHERE (SELECT COUNT(*) FROM monitored_emby_servers) < ?`,
+			server.GroupName, server.Name, server.LineName, server.Note, server.BaseURL, server.ProbePath, retryCount, retryDelay, server.Enabled, now, now, embyHealthMaxServers)
 		if err != nil {
 			return 0, err
 		}
@@ -156,15 +320,15 @@ func (s *telemetryStore) SaveEmbyHealthServer(ctx context.Context, server embyHe
 		return 0, err
 	}
 	defer tx.Rollback()
-	var previousURL string
-	if err := tx.QueryRowContext(ctx, `SELECT base_url FROM monitored_emby_servers WHERE id=?`, server.ID).Scan(&previousURL); err != nil {
+	var previousURL, previousPath string
+	if err := tx.QueryRowContext(ctx, `SELECT base_url,probe_path FROM monitored_emby_servers WHERE id=?`, server.ID).Scan(&previousURL, &previousPath); err != nil {
 		return 0, err
 	}
 	result, err := tx.ExecContext(ctx,
-		`UPDATE monitored_emby_servers SET group_name=?,name=?,line_name=?,note=?,base_url=?,enabled=?,
-		 config_version=config_version+CASE WHEN base_url<>? OR enabled<>? THEN 1 ELSE 0 END,updated_at=? WHERE id=?`,
-		server.GroupName, server.Name, server.LineName, server.Note, server.BaseURL, server.Enabled,
-		server.BaseURL, server.Enabled, time.Now().Unix(), server.ID)
+		`UPDATE monitored_emby_servers SET group_name=?,name=?,line_name=?,note=?,base_url=?,probe_path=?,retry_count=?,retry_delay_sec=?,enabled=?,
+		 config_version=config_version+CASE WHEN base_url<>? OR probe_path<>? OR enabled<>? THEN 1 ELSE 0 END,updated_at=? WHERE id=?`,
+		server.GroupName, server.Name, server.LineName, server.Note, server.BaseURL, server.ProbePath, retryCount, retryDelay, server.Enabled,
+		server.BaseURL, server.ProbePath, server.Enabled, time.Now().Unix(), server.ID)
 	if err != nil {
 		return 0, err
 	}
@@ -175,8 +339,11 @@ func (s *telemetryStore) SaveEmbyHealthServer(ctx context.Context, server embyHe
 	if rows != 1 {
 		return 0, sql.ErrNoRows
 	}
-	if previousURL != server.BaseURL {
+	if previousURL != server.BaseURL || previousPath != server.ProbePath {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM emby_health_checks WHERE server_id=?`, server.ID); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE monitored_emby_servers SET server_version='',detected_name='' WHERE id=?`, server.ID); err != nil {
 			return 0, err
 		}
 	}
@@ -198,9 +365,50 @@ func (s *telemetryStore) DeleteEmbyHealthServer(ctx context.Context, id int64) e
 	return nil
 }
 
+type embyHealthProbeTarget struct {
+	ID            int64
+	BaseURL       string
+	ProbePath     string
+	RetryCount    int
+	RetryDelaySec int
+	Enabled       bool
+	ConfigVersion int64
+}
+
+func (s *telemetryStore) EmbyHealthEnabledServerIDs(ctx context.Context) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM monitored_emby_servers WHERE enabled=1 ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func (s *telemetryStore) EmbyHealthProbeTarget(ctx context.Context, id int64) (embyHealthProbeTarget, error) {
+	var target embyHealthProbeTarget
+	var enabled int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id,base_url,probe_path,retry_count,retry_delay_sec,enabled,config_version FROM monitored_emby_servers WHERE id=?`, id,
+	).Scan(&target.ID, &target.BaseURL, &target.ProbePath, &target.RetryCount, &target.RetryDelaySec, &enabled, &target.ConfigVersion)
+	if err != nil {
+		return embyHealthProbeTarget{}, err
+	}
+	target.RetryCount, target.RetryDelaySec = clampEmbyRetry(target.RetryCount, target.RetryDelaySec)
+	target.Enabled = enabled == 1
+	return target, nil
+}
+
 func (s *telemetryStore) EmbyHealthServers(ctx context.Context, includeDisabled bool) ([]embyHealthServer, error) {
 	now := time.Now()
-	query := `SELECT s.id,s.group_name,s.name,s.line_name,s.note,s.base_url,s.enabled,s.created_at,s.updated_at,s.config_version,
+	query := `SELECT s.id,s.group_name,s.name,s.line_name,s.note,s.base_url,s.probe_path,s.server_version,s.detected_name,s.retry_count,s.retry_delay_sec,s.enabled,s.created_at,s.updated_at,s.config_version,
 		l.checked_at,l.success,l.latency_ms,l.status_code,
 		(SELECT AVG(success)*100.0 FROM emby_health_checks WHERE server_id=s.id AND checked_at>=?),
 		(SELECT AVG(success)*100.0 FROM emby_health_checks WHERE server_id=s.id AND checked_at>=?),
@@ -218,17 +426,22 @@ func (s *telemetryStore) EmbyHealthServers(ctx context.Context, includeDisabled 
 	}
 	defer rows.Close()
 	servers := make([]embyHealthServer, 0)
+	byID := make(map[int64]int)
 	for rows.Next() {
 		var server embyHealthServer
 		var enabled int
 		var checkedAt, success, latency, statusCode sql.NullInt64
 		var availability24h, availability7d, availability30d sql.NullFloat64
-		if err := rows.Scan(&server.ID, &server.GroupName, &server.Name, &server.LineName, &server.Note, &server.BaseURL, &enabled,
+		if err := rows.Scan(&server.ID, &server.GroupName, &server.Name, &server.LineName, &server.Note, &server.BaseURL,
+			&server.ProbePath, &server.ServerVersion, &server.DetectedName, &server.RetryCount, &server.RetryDelaySec, &enabled,
 			&server.CreatedAt, &server.UpdatedAt, &server.ConfigVersion, &checkedAt, &success, &latency, &statusCode,
 			&availability24h, &availability7d, &availability30d); err != nil {
 			return nil, err
 		}
+		server.RetryCount, server.RetryDelaySec = clampEmbyRetry(server.RetryCount, server.RetryDelaySec)
 		server.Enabled = enabled == 1
+		server.EffectiveProbePath = effectiveEmbyProbePath(server.BaseURL, server.ProbePath)
+		server.RecentChecks = make([]embyHealthCheckPoint, 0)
 		if checkedAt.Valid {
 			server.LastCheckedAt = checkedAt.Int64
 			server.LatencyMS = latency.Int64
@@ -260,9 +473,51 @@ func (s *telemetryStore) EmbyHealthServers(ctx context.Context, includeDisabled 
 			value := availability30d.Float64
 			server.Availability30D = &value
 		}
+		byID[server.ID] = len(servers)
 		servers = append(servers, server)
 	}
-	return servers, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(servers) > 0 {
+		hRows, hErr := s.db.QueryContext(ctx, `
+			SELECT server_id, checked_at, success, latency_ms, status_code, retries_used FROM (
+				SELECT server_id, checked_at, success, latency_ms, status_code, retries_used,
+					ROW_NUMBER() OVER (PARTITION BY server_id ORDER BY checked_at DESC, id DESC) AS rn
+				FROM emby_health_checks
+			) WHERE rn <= ?
+			ORDER BY server_id ASC, checked_at ASC, rn DESC`, embyHealthHistoryPoints)
+		if hErr == nil {
+			defer hRows.Close()
+			for hRows.Next() {
+				var srvID int64
+				var pt embyHealthCheckPoint
+				var okInt int
+				if err := hRows.Scan(&srvID, &pt.CheckedAt, &okInt, &pt.LatencyMS, &pt.StatusCode, &pt.RetriesUsed); err != nil {
+					break
+				}
+				pt.Success = okInt == 1
+				if idx, ok := byID[srvID]; ok {
+					servers[idx].RecentChecks = append(servers[idx].RecentChecks, pt)
+				}
+			}
+		}
+		for i := range servers {
+			var sum, cnt int64
+			for _, pt := range servers[i].RecentChecks {
+				if pt.Success && pt.LatencyMS > 0 {
+					sum += pt.LatencyMS
+					cnt++
+				}
+			}
+			if cnt > 0 {
+				servers[i].AvgLatencyMS = sum / cnt
+			} else if servers[i].LatencyMS > 0 {
+				servers[i].AvgLatencyMS = servers[i].LatencyMS
+			}
+		}
+	}
+	return servers, nil
 }
 
 func (s *telemetryStore) EmbyHealthTargetLabels(ctx context.Context) ([]embyHealthServer, error) {
@@ -286,11 +541,11 @@ func (s *telemetryStore) EmbyHealthTargetLabels(ctx context.Context) ([]embyHeal
 
 func (s *telemetryStore) RecordEmbyHealthCheck(ctx context.Context, serverID, configVersion int64, sample embyHealthSample) error {
 	result, err := s.db.ExecContext(ctx,
-		`INSERT INTO emby_health_checks(server_id,checked_at,success,latency_ms,status_code)
-		 SELECT ?,?,?,?,? WHERE EXISTS (
+		`INSERT INTO emby_health_checks(server_id,checked_at,success,latency_ms,status_code,retries_used)
+		 SELECT ?,?,?,?,?,? WHERE EXISTS (
 			SELECT 1 FROM monitored_emby_servers WHERE id=? AND config_version=? AND enabled=1
 		 )`,
-		serverID, sample.CheckedAt, sample.Success, sample.LatencyMS, sample.StatusCode, serverID, configVersion)
+		serverID, sample.CheckedAt, sample.Success, sample.LatencyMS, sample.StatusCode, sample.RetriesUsed, serverID, configVersion)
 	if err != nil {
 		return err
 	}
@@ -300,6 +555,14 @@ func (s *telemetryStore) RecordEmbyHealthCheck(ctx context.Context, serverID, co
 	}
 	if rows != 1 {
 		return sql.ErrNoRows
+	}
+	if sample.ServerVersion != "" || sample.DetectedName != "" {
+		_, _ = s.db.ExecContext(ctx,
+			`UPDATE monitored_emby_servers
+			 SET server_version=CASE WHEN ?<>'' THEN ? ELSE server_version END,
+			     detected_name=CASE WHEN ?<>'' THEN ? ELSE detected_name END
+			 WHERE id=? AND config_version=?`,
+			sample.ServerVersion, sample.ServerVersion, sample.DetectedName, sample.DetectedName, serverID, configVersion)
 	}
 	return nil
 }
@@ -328,6 +591,9 @@ type embyHealthFlight struct {
 }
 
 func newEmbyHealthMonitor(store *telemetryStore, resolver *safeResolver) *embyHealthMonitor {
+	if resolver == nil {
+		resolver = newSafeResolver(time.Minute, false)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	transport := &http.Transport{
 		Proxy:                 nil,
@@ -335,14 +601,14 @@ func newEmbyHealthMonitor(store *telemetryStore, resolver *safeResolver) *embyHe
 		MaxIdleConnsPerHost:   2,
 		IdleConnTimeout:       30 * time.Second,
 		TLSHandshakeTimeout:   3 * time.Second,
-		ResponseHeaderTimeout: embyHealthProbeTimeout,
+		ResponseHeaderTimeout: time.Duration(embyHealthMaxTimeoutSec) * time.Second,
 	}
 	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		info, _ := ctx.Value(targetContextKey{}).(*targetInfo)
 		if info == nil || !sameDialAddress(address, targetHostPort(info.URL)) {
 			return nil, errors.New("health probe dial target was not validated")
 		}
-		dialer := &net.Dialer{Timeout: embyHealthProbeTimeout, KeepAlive: 15 * time.Second}
+		dialer := &net.Dialer{Timeout: time.Duration(embyHealthMaxTimeoutSec) * time.Second, KeepAlive: 15 * time.Second}
 		var lastErr error
 		for _, resolved := range info.DialAddresses {
 			connection, err := dialer.DialContext(ctx, network, resolved)
@@ -361,7 +627,7 @@ func newEmbyHealthMonitor(store *telemetryStore, resolver *safeResolver) *embyHe
 		inFlight: make(map[int64]*embyHealthFlight), probeSlots: make(chan struct{}, 8),
 		client: &http.Client{
 			Transport: transport,
-			Timeout:   embyHealthProbeTimeout,
+			Timeout:   time.Duration(embyHealthMaxTimeoutSec+2) * time.Second,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -410,13 +676,13 @@ func (m *embyHealthMonitor) run() {
 }
 
 func (m *embyHealthMonitor) checkEnabledServers() {
-	servers, err := m.store.EmbyHealthServers(m.ctx, false)
-	if err != nil || len(servers) == 0 {
+	serverIDs, err := m.store.EmbyHealthEnabledServerIDs(m.ctx)
+	if err != nil || len(serverIDs) == 0 {
 		return
 	}
 	semaphore := make(chan struct{}, 8)
 	var checks sync.WaitGroup
-	for _, server := range servers {
+	for _, serverID := range serverIDs {
 		select {
 		case semaphore <- struct{}{}:
 		case <-m.ctx.Done():
@@ -428,9 +694,43 @@ func (m *embyHealthMonitor) checkEnabledServers() {
 			defer checks.Done()
 			defer func() { <-semaphore }()
 			_ = m.CheckNow(m.ctx, id)
-		}(server.ID)
+		}(serverID)
 	}
 	checks.Wait()
+}
+
+func (m *embyHealthMonitor) CheckAllNow(ctx context.Context) error {
+	if m == nil {
+		return errors.New("health monitor unavailable")
+	}
+	serverIDs, err := m.store.EmbyHealthEnabledServerIDs(ctx)
+	if err != nil {
+		return err
+	}
+	if len(serverIDs) == 0 {
+		return nil
+	}
+	semaphore := make(chan struct{}, 8)
+	var checks sync.WaitGroup
+	for _, serverID := range serverIDs {
+		select {
+		case semaphore <- struct{}{}:
+		case <-ctx.Done():
+			checks.Wait()
+			return ctx.Err()
+		case <-m.ctx.Done():
+			checks.Wait()
+			return m.ctx.Err()
+		}
+		checks.Add(1)
+		go func(id int64) {
+			defer checks.Done()
+			defer func() { <-semaphore }()
+			_ = m.CheckNow(ctx, id)
+		}(serverID)
+	}
+	checks.Wait()
+	return nil
 }
 
 func (m *embyHealthMonitor) CheckNow(ctx context.Context, serverID int64) (resultErr error) {
@@ -466,36 +766,89 @@ func (m *embyHealthMonitor) CheckNow(ctx context.Context, serverID int64) (resul
 	case <-m.ctx.Done():
 		return m.ctx.Err()
 	}
-	requestContext, cancel := context.WithTimeout(ctx, embyHealthProbeTimeout)
+	loadCtx, cancelLoad := context.WithTimeout(ctx, 3*time.Second)
+	target, err := m.store.EmbyHealthProbeTarget(loadCtx, serverID)
+	settings := m.store.LoadEmbyProbeSettings(loadCtx)
+	cancelLoad()
+	if err != nil {
+		return err
+	}
+	if !target.Enabled {
+		return errEmbyHealthDisabled
+	}
+	perAttemptTimeout := time.Duration(settings.ProbeTimeoutSec) * time.Second
+	if perAttemptTimeout < time.Duration(embyHealthMinTimeoutSec)*time.Second {
+		perAttemptTimeout = embyHealthProbeTimeout
+	}
+	retryDelay := time.Duration(target.RetryDelaySec) * time.Second
+	totalBudget := time.Duration(1+target.RetryCount)*(perAttemptTimeout+2*time.Second) + time.Duration(target.RetryCount)*retryDelay
+	if totalBudget > 65*time.Second {
+		totalBudget = 65 * time.Second
+	}
+	requestContext, cancel := context.WithTimeout(ctx, totalBudget)
 	stopOnClose := context.AfterFunc(m.ctx, cancel)
 	defer func() {
 		stopOnClose()
 		cancel()
 	}()
-	servers, err := m.store.EmbyHealthServers(requestContext, true)
-	if err != nil {
-		return err
-	}
-	var server *embyHealthServer
-	for index := range servers {
-		if servers[index].ID == serverID {
-			server = &servers[index]
-			break
+	sample := m.probeWithRetry(requestContext, target.BaseURL, target.ProbePath, target.RetryCount, retryDelay, perAttemptTimeout)
+	// Do not record a fake server outage if the caller canceled the manual check request or the monitor is closing.
+	if ctx.Err() != nil || m.ctx.Err() != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
+		return m.ctx.Err()
 	}
-	if server == nil {
-		return sql.ErrNoRows
-	}
-	if !server.Enabled {
-		return errEmbyHealthDisabled
-	}
-	sample := m.probe(requestContext, server.BaseURL)
 	writeContext, cancelWrite := context.WithTimeout(m.ctx, 3*time.Second)
 	defer cancelWrite()
-	return m.store.RecordEmbyHealthCheck(writeContext, serverID, server.ConfigVersion, sample)
+	return m.store.RecordEmbyHealthCheck(writeContext, serverID, target.ConfigVersion, sample)
 }
 
-func (m *embyHealthMonitor) probe(ctx context.Context, baseURL string) (sample embyHealthSample) {
+func sanitizeDetectedEmbyMeta(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || hasControlCharacters(value) {
+		return ""
+	}
+	return truncateRunes(value, 64)
+}
+
+func (m *embyHealthMonitor) probe(ctx context.Context, baseURL string) embyHealthSample {
+	return m.probeWithPath(ctx, baseURL, "")
+}
+
+func (m *embyHealthMonitor) probeWithRetry(ctx context.Context, baseURL, probePath string, retryCount int, retryDelay, perAttemptTimeout time.Duration) embyHealthSample {
+	if retryCount < 0 {
+		retryCount = 0
+	} else if retryCount > embyHealthMaxRetry {
+		retryCount = embyHealthMaxRetry
+	}
+	if perAttemptTimeout <= 0 {
+		perAttemptTimeout = embyHealthProbeTimeout
+	}
+	var lastSample embyHealthSample
+	for attempt := 0; attempt <= retryCount; attempt++ {
+		if attempt > 0 && retryDelay > 0 {
+			timer := time.NewTimer(retryDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return lastSample
+			case <-timer.C:
+			}
+		}
+		attemptCtx, cancelAttempt := context.WithTimeout(ctx, perAttemptTimeout)
+		sample := m.probeWithPath(attemptCtx, baseURL, probePath)
+		cancelAttempt()
+		sample.RetriesUsed = attempt
+		lastSample = sample
+		if sample.Success || ctx.Err() != nil {
+			return sample
+		}
+	}
+	return lastSample
+}
+
+func (m *embyHealthMonitor) probeWithPath(ctx context.Context, baseURL, probePath string) (sample embyHealthSample) {
 	sample = embyHealthSample{CheckedAt: time.Now().Unix()}
 	started := time.Now()
 	defer func() { sample.LatencyMS = time.Since(started).Milliseconds() }()
@@ -507,27 +860,100 @@ func (m *embyHealthMonitor) probe(ctx context.Context, baseURL string) (sample e
 	if err != nil {
 		return sample
 	}
-	base.Path = strings.TrimRight(base.Path, "/") + "/System/Info/Public"
-	base.RawPath = ""
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base.String(), nil)
-	if err != nil {
+
+	baseCleanPath := strings.TrimRight(base.Path, "/")
+	primaryPath := effectiveEmbyProbePath(baseURL, probePath)
+	pathsToTry := []string{primaryPath}
+	if strings.TrimSpace(probePath) == "" && primaryPath == embyHealthDefaultPath {
+		// Automatically fall back to /System/Info/Public for Jellyfin servers that do not expose /emby prefix.
+		pathsToTry = append(pathsToTry, embyHealthFallbackPath)
+	}
+
+	for idx, suffix := range pathsToTry {
+		probeURL := *base
+		probeURL.Path = baseCleanPath + suffix
+		probeURL.RawPath = ""
+		request, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, probeURL.String(), nil)
+		if reqErr != nil {
+			return sample
+		}
+		request.Header.Set("Accept", "application/json")
+		request.Header.Set("User-Agent", embyHealthUserAgent)
+		request = request.WithContext(context.WithValue(request.Context(), targetContextKey{}, &targetInfo{URL: &probeURL, DialAddresses: dialAddresses}))
+		response, doErr := m.client.Do(request)
+		if doErr != nil {
+			if idx == 0 && len(pathsToTry) > 1 && ctx.Err() == nil {
+				continue
+			}
+			return sample
+		}
+		statusCode := response.StatusCode
+		if statusCode < 0 {
+			statusCode = 0
+		} else if statusCode > 599 {
+			statusCode = 599
+		}
+		bodyBytes, _ := io.ReadAll(io.LimitReader(response.Body, 8192))
+		_ = response.Body.Close()
+
+		// Retry fallback path when default /emby/System/Info/Public returns 404 (e.g. Jellyfin).
+		if statusCode == http.StatusNotFound && idx == 0 && len(pathsToTry) > 1 {
+			continue
+		}
+		sample.StatusCode = statusCode
+		if statusCode == http.StatusOK && len(bodyBytes) > 0 {
+			var info struct {
+				ServerName string `json:"ServerName"`
+				Version    string `json:"Version"`
+			}
+			if json.Unmarshal(bodyBytes, &info) == nil {
+				sample.DetectedName = sanitizeDetectedEmbyMeta(info.ServerName)
+				sample.ServerVersion = sanitizeDetectedEmbyMeta(info.Version)
+			}
+		}
+		// 2xx/3xx prove the server responded cleanly; 401/403 on private Emby deployments that deny
+		// anonymous system info still confirm the HTTP edge is alive. 404 (after fallback), 408, 429,
+		// 5xx, and transport failures count as unavailable.
+		sample.Success = (statusCode >= 200 && statusCode < 400) || statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden
 		return sample
 	}
-	request.Header.Set("Accept", "application/json")
-	request = request.WithContext(context.WithValue(request.Context(), targetContextKey{}, &targetInfo{URL: base, DialAddresses: dialAddresses}))
-	response, err := m.client.Do(request)
-	if err != nil {
-		return sample
-	}
-	defer response.Body.Close()
-	sample.StatusCode = response.StatusCode
-	// Some Emby deployments intentionally deny anonymous system endpoints with
-	// 403; that still proves the HTTP edge is reachable. A 5xx response instead
-	// indicates an upstream or gateway failure and counts as an unavailable
-	// probe. Keep the code in the sample for diagnosis.
-	sample.Success = response.StatusCode >= 100 && response.StatusCode < 500
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 	return sample
+}
+
+func looksLikeOriginHost(name string) bool {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return false
+	}
+	if strings.Contains(trimmed, "://") {
+		return true
+	}
+	if strings.ContainsAny(trimmed, " \t\r\n/") {
+		return false
+	}
+	host := trimmed
+	if h, _, err := net.SplitHostPort(trimmed); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	dot := strings.LastIndexByte(host, '.')
+	if dot <= 0 || dot >= len(host)-1 {
+		return false
+	}
+	tld := host[dot+1:]
+	if len(tld) < 2 || len(tld) > 10 {
+		return false
+	}
+	for i := 0; i < len(tld); i++ {
+		c := tld[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			return false
+		}
+	}
+	return true
 }
 
 func embyHealthPublicSnapshot(servers []embyHealthServer) publicEmbyHealthSnapshot {
@@ -537,6 +963,14 @@ func embyHealthPublicSnapshot(servers []embyHealthServer) publicEmbyHealthSnapsh
 		if !server.Enabled {
 			continue
 		}
+		displayName := strings.TrimSpace(server.Name)
+		if looksLikeOriginHost(displayName) {
+			if det := strings.TrimSpace(server.DetectedName); det != "" && !looksLikeOriginHost(det) {
+				displayName = det
+			} else {
+				displayName = "Emby 节点"
+			}
+		}
 		index, exists := groupIndexes[server.GroupName]
 		if !exists {
 			index = len(snapshot.Groups)
@@ -544,7 +978,7 @@ func embyHealthPublicSnapshot(servers []embyHealthServer) publicEmbyHealthSnapsh
 			snapshot.Groups = append(snapshot.Groups, publicEmbyHealthGroup{Name: server.GroupName, Servers: make([]publicEmbyHealthServer, 0)})
 		}
 		snapshot.Groups[index].Servers = append(snapshot.Groups[index].Servers, publicEmbyHealthServer{
-			ID: server.ID, Name: server.Name, LineName: server.LineName, Note: server.Note, Status: server.Status, LatencyMS: server.LatencyMS,
+			ID: server.ID, Name: displayName, LineName: server.LineName, Note: server.Note, Status: server.Status, LatencyMS: server.LatencyMS,
 			LastCheckedAt: server.LastCheckedAt, Availability24H: server.Availability24H,
 			Availability7D: server.Availability7D, Availability30D: server.Availability30D,
 		})

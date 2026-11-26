@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,7 +20,38 @@ import (
 	"time"
 )
 
-const telegramAPIBase = "https://api.telegram.org"
+const (
+	telegramAPIBase          = "https://api.telegram.org"
+	telegramAlertsSettingKey = "telegram_alerts_json"
+)
+
+type telegramAlertSettings struct {
+	NodeOfflineEnabled  bool `json:"node_offline_enabled"`
+	OfflineThresholdSec int  `json:"offline_threshold_sec"`
+	NodeQuotaEnabled    bool `json:"node_quota_enabled"`
+	NodeTLSEnabled      bool `json:"node_tls_enabled"`
+	DNSFailoverEnabled  bool `json:"dns_failover_enabled"`
+}
+
+func defaultTelegramAlertSettings() telegramAlertSettings {
+	return telegramAlertSettings{
+		NodeOfflineEnabled:  true,
+		OfflineThresholdSec: 60,
+		NodeQuotaEnabled:    true,
+		NodeTLSEnabled:      true,
+		DNSFailoverEnabled:  true,
+	}
+}
+
+func normalizeTelegramAlertSettings(in telegramAlertSettings) telegramAlertSettings {
+	if in.OfflineThresholdSec < 15 {
+		in.OfflineThresholdSec = 60
+	}
+	if in.OfflineThresholdSec > 3600 {
+		in.OfflineThresholdSec = 3600
+	}
+	return in
+}
 
 var (
 	telegramTokenPattern = regexp.MustCompile(`^[0-9]{6,15}:[A-Za-z0-9_-]{30,}$`)
@@ -27,11 +59,12 @@ var (
 )
 
 type telegramConfig struct {
-	Enabled      bool   `json:"enabled"`
-	ChatID       string `json:"chat_id"`
-	SendHour     int    `json:"send_hour"`
-	TokenSet     bool   `json:"token_set"`
-	LastSentDate string `json:"last_sent_date"`
+	Enabled      bool                  `json:"enabled"`
+	ChatID       string                `json:"chat_id"`
+	SendHour     int                   `json:"send_hour"`
+	TokenSet     bool                  `json:"token_set"`
+	LastSentDate string                `json:"last_sent_date"`
+	Alerts       telegramAlertSettings `json:"alerts"`
 }
 
 type telegramRecord struct {
@@ -103,6 +136,8 @@ type telegramReporter struct {
 	client  *http.Client
 	apiBase string
 	zone    *time.Location
+	ctx     context.Context
+	cancel  context.CancelFunc
 	stop    chan struct{}
 	done    chan struct{}
 	wake    chan struct{}
@@ -116,10 +151,12 @@ func newTelegramReporter(store *telemetryStore, gateway *Gateway, secret []byte)
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
+	ctx, cancel := context.WithCancel(context.Background())
 	reporter := &telegramReporter{
 		store: store, gateway: gateway, cipher: cipher,
 		client:  &http.Client{Transport: transport, Timeout: 15 * time.Second},
 		apiBase: telegramAPIBase, zone: applicationLocation,
+		ctx: ctx, cancel: cancel,
 		stop: make(chan struct{}), done: make(chan struct{}), wake: make(chan struct{}, 1),
 	}
 	go reporter.run()
@@ -131,6 +168,7 @@ func (t *telegramReporter) Close() {
 		return
 	}
 	t.close.Do(func() {
+		t.cancel()
 		close(t.stop)
 		<-t.done
 		t.client.CloseIdleConnections()
@@ -144,9 +182,9 @@ func (t *telegramReporter) run() {
 	for {
 		select {
 		case now := <-ticker.C:
-			t.maybeSend(context.Background(), now)
+			t.maybeSend(t.ctx, now)
 		case <-t.wake:
-			t.maybeSend(context.Background(), time.Now())
+			t.maybeSend(t.ctx, time.Now())
 		case <-t.stop:
 			return
 		}
@@ -185,6 +223,44 @@ func (t *telegramReporter) SendTest(ctx context.Context) error {
 		return errors.New("telegram token and chat id are required")
 	}
 	return t.sendMessage(ctx, record, "Refract Telegram 通知测试成功。")
+}
+
+func (t *telegramReporter) SendAlert(ctx context.Context, kind, title string, lines []string) error {
+	if t == nil || t.store == nil {
+		return nil
+	}
+	alerts := t.store.LoadTelegramAlerts(ctx)
+	switch kind {
+	case "node_offline":
+		if !alerts.NodeOfflineEnabled {
+			return nil
+		}
+	case "node_quota":
+		if !alerts.NodeQuotaEnabled {
+			return nil
+		}
+	case "node_tls":
+		if !alerts.NodeTLSEnabled {
+			return nil
+		}
+	case "dns_failover":
+		if !alerts.DNSFailoverEnabled {
+			return nil
+		}
+	}
+	record, err := t.store.TelegramRecord(ctx)
+	if err != nil || record.EncryptedToken == "" || record.ChatID == "" {
+		return nil
+	}
+	body := make([]string, 0, len(lines)+2)
+	body = append(body, "【Refract 告警】"+strings.TrimSpace(title))
+	body = append(body, "时间："+time.Now().In(t.zone).Format("2006-01-02 15:04:05"))
+	for _, line := range lines {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			body = append(body, trimmed)
+		}
+	}
+	return t.sendMessage(ctx, record, strings.Join(body, "\n"))
 }
 
 func (t *telegramReporter) sendRecord(ctx context.Context, record telegramRecord) error {
@@ -257,7 +333,38 @@ func (s *telemetryStore) TelegramRecord(ctx context.Context) (telegramRecord, er
 		Scan(&enabled, &record.EncryptedToken, &record.ChatID, &record.SendHour, &record.LastSentDate)
 	record.Enabled = enabled == 1
 	record.TokenSet = record.EncryptedToken != ""
+	record.Alerts = s.LoadTelegramAlerts(ctx)
 	return record, err
+}
+
+func (s *telemetryStore) LoadTelegramAlerts(ctx context.Context) telegramAlertSettings {
+	if s == nil {
+		return defaultTelegramAlertSettings()
+	}
+	var raw string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM gateway_settings WHERE key=?`, telegramAlertsSettingKey).Scan(&raw)
+	if err != nil || strings.TrimSpace(raw) == "" {
+		return defaultTelegramAlertSettings()
+	}
+	var loaded telegramAlertSettings
+	if err := json.Unmarshal([]byte(raw), &loaded); err != nil {
+		return defaultTelegramAlertSettings()
+	}
+	return normalizeTelegramAlertSettings(loaded)
+}
+
+func (s *telemetryStore) SaveTelegramAlerts(ctx context.Context, alerts telegramAlertSettings) error {
+	normalized := normalizeTelegramAlertSettings(alerts)
+	data, err := json.Marshal(normalized)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO gateway_settings(key,value,updated_at) VALUES(?,?,?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+		telegramAlertsSettingKey, string(data), time.Now().Unix(),
+	)
+	return err
 }
 
 func (s *telemetryStore) SaveTelegram(ctx context.Context, config telegramConfig, encryptedToken string) error {

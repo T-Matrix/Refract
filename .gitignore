@@ -9,5 +9,10 @@
 bin/
 dist/
 coverage.out
+backups/
+*.sqlite
+*-state.json
+runtime-config.json
+runtime-config.json.backup
 vps-url-gateway-v*.tar.gz
 Refract-v*.tar.gz

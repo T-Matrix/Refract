@@ -3,152 +3,458 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="description" content="Refract 通用反向代理服务状态与访问入口。">
-    <meta name="theme-color" content="#f4f6f7">
+    <meta name="description" content="Refract 通用反向代理与 Emby/Jellyfin 流媒体网关实时入口。">
+    <meta name="theme-color" content="#f8f9fb">
     <title>Refract · 通用反向代理</title>
     <link rel="icon" href="/_gateway/avatar">
     <link rel="apple-touch-icon" href="/_gateway/avatar">
-    <link rel="stylesheet" href="/_gateway/assets/frontend.css?v=1.15.0-20261017-emby-health-2">
-    <script src="/_gateway/assets/frontend.js?v=1.15.0-20261017-emby-health-2" defer></script>
+    <link rel="stylesheet" href="/_gateway/assets/frontend.css?v=2.2.6">
+    <script src="/_gateway/assets/frontend.js?v=2.2.6" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#main-content">跳到主要内容</a>
-    <div class="ambient-danmaku" id="ambient-danmaku" aria-hidden="true"></div>
+
+    <!-- Interactive Optical Backdrop -->
+    <div class="stage-backdrop" aria-hidden="true">
+      <div class="stage-dots"></div>
+      <div class="stage-prism"></div>
+      <div class="stage-spotlight" id="stage-spotlight"></div>
+    </div>
 
     <header class="site-header">
-      <div class="header-inner shell">
+      <div class="shell header-inner">
         <a class="brand" href="/" aria-label="Refract 首页">
-          <img class="brand-icon" src="/_gateway/avatar" alt="" width="40" height="40">
-          <span class="brand-copy">
-            <span class="brand-name">Refract</span>
-            <span class="brand-meta">通用反向代理</span>
+          <span class="brand-avatar">
+            <img src="/_gateway/avatar" alt="" width="32" height="32">
           </span>
+          <span class="brand-name">Refract</span>
+          <span class="brand-ver" id="gateway-version">v2.0.0-beta.1</span>
         </a>
-        <div class="nav" aria-label="页面导航">
-          <a class="nav-action admin-login" href="/login">管理员登录</a>
-          <div class="nav-action header-action" id="header-status" data-state="checking" role="status">
+
+        <nav class="header-nav" aria-label="页面导航">
+          <a class="nav-pill" id="health-anchor" href="#emby-health-section" hidden>
             <span class="status-dot" aria-hidden="true"></span>
-            <span id="header-status-label">正在检测</span>
-          </div>
-        </div>
+            <span id="health-nav-count">节点状态</span>
+          </a>
+          <button class="icon-btn" id="theme-toggle" type="button" aria-label="切换深色模式" title="切换深色模式">
+            <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path>
+            </svg>
+            <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="4"></circle>
+              <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path>
+            </svg>
+          </button>
+          <a class="btn btn-dark btn-sm" href="/login" data-admin-link>
+            <span>管理员登录</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M5 12h14"></path>
+              <path d="m12 5 7 7-7 7"></path>
+            </svg>
+          </a>
+        </nav>
       </div>
     </header>
 
     <main id="main-content" tabindex="-1">
-      <section class="hero" aria-labelledby="hero-title">
-        <div class="hero-inner shell">
-          <div class="hero-copy">
-            <p class="eyebrow mono-label">
-              <span class="live-dot" aria-hidden="true"></span>
-              <span>多后端代理 · 流式传输</span>
-            </p>
-            <h1 id="hero-title">Refract</h1>
-            <p class="hero-slogan">把原始地址放在当前域名之后。</p>
-            <p class="hero-description">自动处理多后端跳转与推流链接，让 Emby 和兼容客户端始终通过同一个反代入口访问。</p>
-            <div class="hero-actions">
-              <button class="button button-primary" id="copy-entry-action" type="button">
-                <span id="copy-entry-label">复制示例</span>
-                <svg class="button-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <rect width="14" height="14" x="8" y="8" rx="2"></rect>
-                  <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path>
-                </svg>
-              </button>
-              <a class="button button-secondary" href="https://github.com/T-Matrix/Refract" target="_blank" rel="noreferrer">GitHub</a>
+      <section class="hero-stage" aria-labelledby="hero-title">
+        <div class="shell hero-stack">
+          <div class="hero-intro">
+            <div class="live-chip" id="header-status" data-state="checking" role="status">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span id="header-status-label">正在检测网关状态</span>
+              <span class="chip-sep" aria-hidden="true">·</span>
+              <span class="chip-meta">HTTP(S) / WS / HLS</span>
             </div>
-            <div class="model-line mono-label" aria-label="解析目标、连接上游、流式返回">
-              <span>解析目标</span><span class="model-separator" aria-hidden="true"></span>
-              <span>连接上游</span><span class="model-separator" aria-hidden="true"></span>
-              <span>流式返回</span>
+
+            <h1 id="hero-title">一个入口，<span class="prism-text">折射任意源站</span></h1>
+            <p class="hero-subtitle">在下方输入你的 Emby 或 HTTP(S) 源站地址即可实时生成反代入口，自动接管跳转、媒体清单与推流签名。</p>
+          </div>
+
+          <!-- Dedicated Controller Official Website Showcase (Visible ONLY in Controller mode) -->
+          <section class="controller-portal" id="controller-portal" aria-labelledby="controller-portal-title">
+            <!-- Hero Section -->
+            <div class="ctrl-hero">
+              <div class="live-chip controller-chip" id="controller-status" data-state="checking" role="status">
+                <span class="status-dot" aria-hidden="true"></span>
+                <span id="controller-status-label">集群控制面运行正常</span>
+              </div>
+              <h1 id="controller-portal-title">下一代流媒体<span class="prism-text">边缘加速与智能调度网关</span></h1>
+              <p class="ctrl-subtitle">专为 Emby / Jellyfin 与自建源站打造的轻量化集群网关，统管全球边缘节点编排、流图 WAF、智能分流与实时观影审计。</p>
+              <div class="ctrl-cta-row">
+                <a class="ctrl-cta-primary" href="/login">
+                  <span>进入管理控制台</span>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M5 12h14"></path>
+                    <path d="m12 5 7 7-7 7"></path>
+                  </svg>
+                </a>
+                <a class="ctrl-cta-secondary" href="https://github.com/T-Matrix/Refract" target="_blank" rel="noreferrer">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4"></path>
+                    <path d="M9 18c-4.51 2-5-2-7-2"></path>
+                  </svg>
+                  <span>GitHub 开源项目</span>
+                </a>
+              </div>
+              <div class="ctrl-trust-strip" aria-label="核心架构特性">
+                <span>单二进制零依赖</span>
+                <i aria-hidden="true"></i>
+                <span>Auto-TLS 自动证书</span>
+                <i aria-hidden="true"></i>
+                <span>SSE 毫秒级热同步</span>
+                <i aria-hidden="true"></i>
+                <span>Fail-Open 断网续航</span>
+              </div>
+            </div>
+
+            <!-- Interactive Architecture Preview Card -->
+            <div class="ctrl-arch-card">
+              <div class="ctrl-arch-track" aria-label="Refract 边缘集群转发架构示意图">
+                <div class="ctrl-arch-node">
+                  <span class="ctrl-arch-ico" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <rect width="20" height="14" x="2" y="3" rx="2"></rect>
+                      <path d="M8 21h8M12 17v4"></path>
+                    </svg>
+                  </span>
+                  <div class="ctrl-arch-copy">
+                    <strong>播放器 / 客户端</strong>
+                    <span>SenPlayer · Infuse · VidHub · Hills</span>
+                  </div>
+                </div>
+
+                <div class="beam-fiber" aria-hidden="true"><span class="beam-packet packet-a"></span></div>
+
+                <div class="ctrl-arch-core">
+                  <span class="ctrl-arch-core-badge">Refract 边缘集群</span>
+                  <strong id="ctrl-arch-nodes">集群控制面就绪</strong>
+                </div>
+
+                <div class="beam-fiber" aria-hidden="true"><span class="beam-packet packet-b"></span></div>
+
+                <div class="ctrl-arch-node is-right">
+                  <div class="ctrl-arch-copy">
+                    <strong>任意后端源站</strong>
+                    <span>Emby · Jellyfin · HTTP(S) / HLS</span>
+                  </div>
+                  <span class="ctrl-arch-ico" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <rect width="20" height="8" x="2" y="2" rx="2" ry="2"></rect>
+                      <rect width="20" height="8" x="2" y="14" rx="2" ry="2"></rect>
+                      <line x1="6" x2="6.01" y1="6" y2="6"></line>
+                      <line x1="6" x2="6.01" y1="18" y2="18"></line>
+                    </svg>
+                  </span>
+                </div>
+              </div>
+
+              <div class="ctrl-arch-footer">
+                <div class="ctrl-plane-tabs" id="ctrl-plane-tabs" role="tablist" aria-label="集群能力平面预览">
+                  <button class="ctrl-plane-tab active" type="button" data-ctrl-plane="edge" role="tab" aria-selected="true">边缘调度面</button>
+                  <button class="ctrl-plane-tab" type="button" data-ctrl-plane="waf" role="tab" aria-selected="false">安全防护面</button>
+                  <button class="ctrl-plane-tab" type="button" data-ctrl-plane="observe" role="tab" aria-selected="false">可观测审计</button>
+                </div>
+                <p class="ctrl-plane-desc" id="ctrl-plane-desc">一机多域、Auto-TLS 自动签发与 DNS-01 泛域名托管，SSE 毫秒级热同步并支持断网 Fail-Open。</p>
+              </div>
+            </div>
+
+            <!-- 6-Card Bento Capabilities Grid -->
+            <div class="ctrl-features" aria-labelledby="ctrl-features-heading">
+              <div class="ctrl-features-head">
+                <div class="ctrl-features-title">
+                  <span class="health-kicker">CORE CAPABILITIES</span>
+                  <h2 id="ctrl-features-heading">一套主控，统管全网边缘代理</h2>
+                </div>
+                <span class="ctrl-features-note">反代业务流量由边缘线路域名独立承载 · 后台可随时关闭公开主页</span>
+              </div>
+              <div class="ctrl-bento">
+                <article class="ctrl-bento-card">
+                  <div class="ctrl-bento-top">
+                    <span class="ctrl-bento-icon accent" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="2" y="2" width="20" height="8" rx="2"></rect><rect x="2" y="14" width="20" height="8" rx="2"></rect>
+                        <line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line>
+                      </svg>
+                    </span>
+                    <h3>边缘集群编排</h3>
+                  </div>
+                  <p>主控与边缘节点分离，一条命令接入保活，按域名与单机独立覆写限速和并发策略。</p>
+                </article>
+
+                <article class="ctrl-bento-card">
+                  <div class="ctrl-bento-top">
+                    <span class="ctrl-bento-icon emerald" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"></path><path d="m9 12 2 2 4-4"></path>
+                      </svg>
+                    </span>
+                    <h3>可视化流图 WAF</h3>
+                  </div>
+                  <p>拖拽连线编排地区、播放器、IP/CIDR 与时段规则，自动识别历史播放器一键勾选。</p>
+                </article>
+
+                <article class="ctrl-bento-card">
+                  <div class="ctrl-bento-top">
+                    <span class="ctrl-bento-icon sky" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"></circle><path d="M2 12h20"></path>
+                        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+                      </svg>
+                    </span>
+                    <h3>智能 DNS 分流切线</h3>
+                  </div>
+                  <p>整合 AxisNow 三网分线路解析与 Cloudflare 主备容灾，灰云 CNAME 无感切线。</p>
+                </article>
+
+                <article class="ctrl-bento-card">
+                  <div class="ctrl-bento-top">
+                    <span class="ctrl-bento-icon accent" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+                      </svg>
+                    </span>
+                    <h3>流媒体原生透传</h3>
+                  </div>
+                  <p>无需逐台预设上游即可折射任意 Emby / Jellyfin，自动改写 302、HLS 与推流签名。</p>
+                </article>
+
+                <article class="ctrl-bento-card">
+                  <div class="ctrl-bento-top">
+                    <span class="ctrl-bento-icon amber" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <rect width="20" height="15" x="2" y="7" rx="2" ry="2"></rect><polyline points="17 2 12 7 7 2"></polyline>
+                      </svg>
+                    </span>
+                    <h3>实时观影与源站探针</h3>
+                  </div>
+                  <p>秒级感知在线片名与码率，支持一键断开并阻断重连；内置 Emby 源站心跳探测监控。</p>
+                </article>
+
+                <article class="ctrl-bento-card">
+                  <div class="ctrl-bento-top">
+                    <span class="ctrl-bento-icon emerald" aria-hidden="true">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 20h9"></path><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"></path>
+                      </svg>
+                    </span>
+                    <h3>CDN 真实 IP 与审计</h3>
+                  </div>
+                  <p>按域名开启前置 CDN 真实 IP 识别与防伪造，精准联动 GeoIP、单 IP 限速与日志检索。</p>
+                </article>
+              </div>
+            </div>
+          </section>
+
+          <!-- Geo / Region Restricted Friendly Notice (Visible when visitor region is blocked by WAF / Geo policy) -->
+          <div class="geo-notice" id="geo-notice" role="alert" hidden>
+            <span class="geo-notice-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <path d="M12 8v4"></path>
+                <path d="M12 16h.01"></path>
+              </svg>
+            </span>
+            <div class="geo-notice-body">
+              <div class="geo-notice-head">
+                <strong id="geo-notice-title">当前地区暂不可用</strong>
+                <span class="geo-notice-badge" id="geo-notice-region" hidden></span>
+              </div>
+              <p id="geo-notice-desc">检测到你所在的国家或地区不在本线路允许范围内，可以浏览此页面，但实际代理与媒体播放请求将被拦截。</p>
             </div>
           </div>
 
-          <section class="gateway-visual pointer-tilt" id="gateway-entry" data-max-tilt="5" aria-labelledby="gateway-title">
-            <div class="gateway-topline mono-label">
-              <span id="gateway-title">通用代理入口</span>
-              <span class="gateway-status" id="gateway-status" data-state="checking">检测中</span>
-            </div>
-            <div class="endpoint">
-              <span class="endpoint-method mono-label">访问格式</span>
-              <button class="endpoint-copy" id="copy-endpoint" type="button" aria-describedby="copy-feedback">
-                <code id="endpoint-value">正在生成当前域名示例…</code>
-                <span class="copy-action" aria-hidden="true">
-                  <svg class="copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <!-- Interactive Optical Gateway Console -->
+          <section class="prism-card" id="prism-card" aria-labelledby="gateway-title">
+            <div class="prism-card-glow" aria-hidden="true"></div>
+            <div class="prism-card-inner">
+              <!-- Animated Optical Signal Beam -->
+              <div class="beam-track" id="beam-track" aria-label="客户端经由 Refract 折射至目标源站">
+                <div class="beam-endpoint">
+                  <span class="beam-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <rect width="20" height="14" x="2" y="3" rx="2"></rect>
+                      <path d="M8 21h8M12 17v4"></path>
+                    </svg>
+                  </span>
+                  <span>客户端</span>
+                </div>
+
+                <div class="beam-fiber" aria-hidden="true">
+                  <span class="beam-packet packet-a"></span>
+                </div>
+
+                <div class="beam-core" id="beam-core">
+                  <span class="beam-core-ring" aria-hidden="true"></span>
+                  <span class="beam-core-dot" id="gateway-status" data-state="checking" aria-hidden="true"></span>
+                  <strong id="gateway-title">Refract</strong>
+                </div>
+
+                <div class="beam-fiber" aria-hidden="true">
+                  <span class="beam-packet packet-b"></span>
+                </div>
+
+                <div class="beam-endpoint">
+                  <span class="beam-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                      <rect width="20" height="8" x="2" y="2" rx="2" ry="2"></rect>
+                      <rect width="20" height="8" x="2" y="14" rx="2" ry="2"></rect>
+                      <line x1="6" x2="6.01" y1="6" y2="6"></line>
+                      <line x1="6" x2="6.01" y1="18" y2="18"></line>
+                    </svg>
+                  </span>
+                  <span id="beam-target-host">emby.example.com</span>
+                </div>
+              </div>
+
+              <!-- Edge Line Selector (Auto-revealed when online edge nodes exist) -->
+              <div class="edge-line-bar" id="edge-line-bar" hidden>
+                <span class="edge-line-label">选择线路</span>
+                <div class="edge-line-pills" id="edge-line-pills" role="tablist" aria-label="选择反代线路节点"></div>
+              </div>
+
+              <!-- Mode Switcher & Quick Presets -->
+              <div class="console-controls">
+                <div class="mode-switch" id="mode-switch" role="tablist" aria-label="代理接入模式">
+                  <span class="mode-indicator" id="mode-indicator" aria-hidden="true"></span>
+                  <button class="active" type="button" data-mode="full" role="tab" aria-selected="true">完整源站（多后端）</button>
+                  <button type="button" data-mode="direct" role="tab" aria-selected="false">默认上游（直连）</button>
+                </div>
+
+                <div class="preset-row" id="preset-row" aria-label="快捷示例预设">
+                  <span class="preset-label">填入示例</span>
+                  <button class="preset-chip" type="button" data-preset="https://emby.example.com:8096">Emby 8096</button>
+                  <button class="preset-chip" type="button" data-preset="https://media.example.com:8920">HTTPS 8920</button>
+                  <button class="preset-chip" type="button" data-preset="https://jellyfin.example.com">Jellyfin</button>
+                </div>
+              </div>
+
+              <!-- Quick Usage Guide (Visible in Full Origin mode) -->
+              <div class="composer-guide" id="composer-guide">
+                <div class="guide-step">
+                  <span class="guide-num" aria-hidden="true">1</span>
+                  <span>在下方输入或粘贴你的 Emby / 源站地址</span>
+                </div>
+                <span class="guide-arrow" aria-hidden="true">→</span>
+                <div class="guide-step">
+                  <span class="guide-num" aria-hidden="true">2</span>
+                  <span>复制自动生成的反代链接填入客户端</span>
+                </div>
+              </div>
+
+              <!-- Live Origin Input -->
+              <div class="origin-row" id="origin-row">
+                <label class="origin-prefix" for="origin-input">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M12 20h9"></path>
+                    <path d="M16.376 3.622a1 1 0 0 1 3.002 3.002L7.368 18.635a2 2 0 0 1-.855.506l-2.872.838a.5.5 0 0 1-.62-.62l.838-2.872a2 2 0 0 1 .506-.854z"></path>
+                  </svg>
+                  <span>源站地址</span>
+                </label>
+                <input id="origin-input" type="url" value="" placeholder="在此输入或粘贴源站，如 https://emby.example.com:8096" autocomplete="off" spellcheck="false" aria-describedby="composer-guide">
+                <button class="origin-clear" id="origin-clear" type="button" aria-label="清空源站地址" title="清空" hidden>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M18 6 6 18"></path>
+                    <path d="m6 6 12 12"></path>
+                  </svg>
+                </button>
+                <span class="origin-meta is-idle" id="origin-meta">支持直接输入</span>
+              </div>
+
+              <!-- Generated Refracted Endpoint -->
+              <div class="output-bar" id="output-bar">
+                <div class="output-main">
+                  <div class="output-head">
+                    <span class="output-badge" id="output-badge">示例预览</span>
+                    <span class="output-hint" id="output-hint">输入上方源站地址后将实时替换</span>
+                  </div>
+                  <div class="output-code" id="endpoint-display" title="点击右侧按钮复制">
+                    <span class="url-gateway" id="origin-label">http://localhost:8080</span><span class="url-slash" id="url-slash">/</span><span class="url-target is-placeholder" id="target-label">https://emby.example.com:8096</span>
+                  </div>
+                </div>
+                <button class="copy-btn" id="copy-endpoint" type="button" aria-describedby="copy-feedback">
+                  <svg class="copy-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <rect width="14" height="14" x="8" y="8" rx="2"></rect>
                     <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path>
                   </svg>
-                  <svg class="check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <svg class="check-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <path d="m20 6-11 11-5-5"></path>
                   </svg>
-                  <span class="copy-label" id="copy-label">复制</span>
-                </span>
-              </button>
+                  <span id="copy-label">复制入口</span>
+                </button>
+              </div>
               <p class="copy-feedback" id="copy-feedback" role="status" aria-live="polite"></p>
             </div>
-            <div class="gateway-flow mono-label" aria-label="请求链路：客户端、Refract、原始服务器">
-              <span class="flow-step">客户端</span>
-              <span class="flow-line" aria-hidden="true"></span>
-              <span class="flow-step flow-step-active">Refract</span>
-              <span class="flow-line" aria-hidden="true"></span>
-              <span class="flow-step">原始服务器</span>
-            </div>
-            <div class="gateway-bottom">
-              <dl class="gateway-facts mono-label">
-                <div class="gateway-fact"><dt>状态</dt><dd id="service-state">检测中</dd></div>
-                <div class="gateway-fact"><dt>协议</dt><dd>HTTP(S)</dd></div>
-                <div class="gateway-fact"><dt>模式</dt><dd>多后端</dd></div>
-                <div class="gateway-fact"><dt>版本</dt><dd id="gateway-version">--</dd></div>
-              </dl>
-            </div>
           </section>
+
+          <!-- Interactive Minimal Feature Pills -->
+          <div class="feature-bar" aria-label="核心特性">
+            <div class="feature-pills" role="tablist" aria-label="查看特性说明">
+              <button class="feature-pill active" type="button" data-feature="routing" role="tab" aria-selected="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8L22 12L18 16"></path><path d="M2 12H22"></path></svg>
+                <span>多后端透传</span>
+              </button>
+              <button class="feature-pill" type="button" data-feature="signing" role="tab" aria-selected="false">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                <span>推流自动签名</span>
+              </button>
+              <button class="feature-pill" type="button" data-feature="protection" role="tab" aria-selected="false">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"></path></svg>
+                <span>出口带宽保护</span>
+              </button>
+            </div>
+            <p class="feature-caption" id="feature-caption">保留原始方法、Range 分片与 WebSocket 通道，无需为每台服务器单独配置反代。</p>
+          </div>
         </div>
       </section>
 
-      <section class="capability-band" aria-label="代理能力">
-        <div class="capability-grid shell">
-          <article class="capability">
-            <span class="capability-index mono-label"><span class="capability-number">01</span><span class="capability-code">/ 通用</span></span>
-            <h2>任意公网后端</h2>
-            <p>在入口后拼接完整 HTTP 或 HTTPS 地址，不必为每个后端重复配置。</p>
-          </article>
-          <article class="capability">
-            <span class="capability-index mono-label"><span class="capability-number">02</span><span class="capability-code">/ 连续</span></span>
-            <h2>推流地址跟随</h2>
-            <p>重写跨域跳转、播放清单和媒体地址，播放过程保持在当前入口。</p>
-          </article>
-          <article class="capability">
-            <span class="capability-index mono-label"><span class="capability-number">03</span><span class="capability-code">/ 公平</span></span>
-            <h2>共享带宽保护</h2>
-            <p>并发控制与单 IP 聚合限速共同保护出口，避免单个客户端占满带宽。</p>
-          </article>
+      <!-- Public Edge Nodes Showcase (Auto-revealed in Controller cluster mode) -->
+      <section id="edge-nodes-section" class="health-section" aria-labelledby="edge-nodes-title" hidden>
+        <div class="shell">
+          <div class="health-head">
+            <div>
+              <span class="health-kicker">LIVE EDGE NETWORK</span>
+              <h2 id="edge-nodes-title">边缘节点实时状态</h2>
+            </div>
+            <div class="health-meta">
+              <span id="edge-nodes-summary-pill" class="health-pill">0 条线路在线</span>
+              <span id="edge-nodes-updated" class="health-updated">实时同步</span>
+            </div>
+          </div>
+          <div id="edge-nodes-groups" class="health-groups"></div>
+          <p class="health-footnote">以上为当前在线且公开可见的反代边缘线路，点击「使用此线路」可一键切换上方入口地址。</p>
         </div>
       </section>
 
-      <section id="emby-health-section" class="health-band" aria-labelledby="health-title" hidden>
-        <div class="health-inner shell">
-          <div class="health-heading">
-            <div><p class="mono-label">Emby Network</p><h2 id="health-title">服务器状态</h2></div>
-            <p id="health-updated" class="health-updated">等待状态数据</p>
+      <!-- Public Emby Network Health (Auto-revealed in Standalone mode when monitored servers exist) -->
+      <section id="emby-health-section" class="health-section" aria-labelledby="health-title" hidden>
+        <div class="shell">
+          <div class="health-head">
+            <div>
+              <span class="health-kicker">LIVE EMBY NETWORK</span>
+              <h2 id="health-title">服务器可用率状态</h2>
+            </div>
+            <div class="health-meta">
+              <span id="health-summary-pill" class="health-pill">加载中</span>
+              <span id="health-updated" class="health-updated">等待数据</span>
+            </div>
           </div>
           <div id="health-groups" class="health-groups"></div>
-          <p class="health-footnote">监测可用率按本服务记录的探测样本统计。</p>
-        </div>
-      </section>
-
-      <section class="format-band" aria-labelledby="format-title">
-        <div class="format-inner shell">
-          <div>
-            <p class="mono-label">Address format</p>
-            <h2 id="format-title">一个入口，多个原始服务器</h2>
-          </div>
-          <code><span id="origin-label">https://当前域名</span>/<strong>https://原始服务器地址</strong></code>
+          <p class="health-footnote">可用率按本网关真实探测样本实时统计，原始源站地址默认脱敏隐藏。</p>
         </div>
       </section>
     </main>
 
     <footer class="site-footer">
-      <div class="footer-inner shell">
-        <span>Refract</span>
-        <span>© <span id="current-year">2026</span> 通用反向代理</span>
+      <div class="shell footer-inner">
+        <span class="footer-brand">Refract · 通用反向代理</span>
+        <div class="footer-links">
+          <a href="https://github.com/T-Matrix/Refract" target="_blank" rel="noreferrer">GitHub</a>
+          <span aria-hidden="true" data-admin-link>·</span>
+          <a href="/login" data-admin-link>管理控制台</a>
+          <span aria-hidden="true">·</span>
+          <span>© <span id="current-year">2026</span></span>
+        </div>
       </div>
     </footer>
   </body>

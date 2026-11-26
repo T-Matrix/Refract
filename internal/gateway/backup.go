@@ -46,6 +46,8 @@ type backupManager struct {
 	store     *telemetryStore
 	directory string
 	mu        sync.Mutex
+	ctx       context.Context
+	cancel    context.CancelFunc
 	stop      chan struct{}
 	done      chan struct{}
 	wake      chan struct{}
@@ -63,8 +65,10 @@ func newBackupManager(store *telemetryStore, cfg Config) (*backupManager, error)
 	if err := os.Chmod(directory, 0700); err != nil {
 		return nil, err
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	manager := &backupManager{
-		store: store, directory: directory, stop: make(chan struct{}), done: make(chan struct{}), wake: make(chan struct{}, 1),
+		store: store, directory: directory, ctx: ctx, cancel: cancel,
+		stop: make(chan struct{}), done: make(chan struct{}), wake: make(chan struct{}, 1),
 	}
 	go manager.run()
 	return manager, nil
@@ -75,6 +79,7 @@ func (m *backupManager) Close() {
 		return
 	}
 	m.closeOnce.Do(func() {
+		m.cancel()
 		close(m.stop)
 		<-m.done
 	})
@@ -108,7 +113,7 @@ func (m *backupManager) run() {
 
 func (m *backupManager) maybeCreate(now time.Time) {
 	now = inApplicationTimezone(now)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Minute)
 	defer cancel()
 	config, err := m.store.LoadBackupConfig(ctx)
 	if err != nil || !config.Enabled || now.Hour() != config.Hour {
@@ -339,22 +344,72 @@ func validateSQLiteBackup(path string) error {
 	if readErr != nil || string(header) != "SQLite format 3\x00" {
 		return errors.New("file is not a SQLite database")
 	}
-	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path)+"?mode=ro&_pragma=query_only(1)&_pragma=trusted_schema(0)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return err
 	}
 	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	var integrity string
-	if err := db.QueryRow(`PRAGMA integrity_check`).Scan(&integrity); err != nil || integrity != "ok" {
+	if err := db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity); err != nil || integrity != "ok" {
 		return errors.New("backup integrity check failed")
+	}
+	// Reject triggers, views, virtual tables, and generated columns to neutralize hostile SQLite schemas.
+	var unsafeObjects int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM sqlite_master
+		WHERE type IN ('trigger','view')
+		   OR UPPER(COALESCE(sql,'')) LIKE '%CREATE VIRTUAL TABLE%'
+		   OR UPPER(COALESCE(sql,'')) LIKE '%GENERATED ALWAYS AS%'
+	`).Scan(&unsafeObjects); err != nil || unsafeObjects > 0 {
+		return errors.New("backup contains unsupported triggers, views, virtual tables, or generated columns")
 	}
 	for _, table := range []string{"request_logs", "traffic_minutes", "gateway_settings", "proxy_rules", "telegram_settings", "geo_ip_cache", "client_geo_hours"} {
 		var count int
-		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count); err != nil || count != 1 {
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count); err != nil || count != 1 {
 			return fmt.Errorf("backup is missing table %s", table)
 		}
 	}
 	return nil
+}
+
+func commonTableColumns(ctx context.Context, tx *sql.Tx, table string) ([]string, error) {
+	mainCols := make(map[string]struct{})
+	rows, err := tx.QueryContext(ctx, `SELECT name FROM main.pragma_table_info('`+table+`')`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		mainCols[name] = struct{}{}
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	restoredRows, err := tx.QueryContext(ctx, `SELECT name FROM restored.pragma_table_info('`+table+`')`)
+	if err != nil {
+		return nil, err
+	}
+	var common []string
+	for restoredRows.Next() {
+		var name string
+		if err := restoredRows.Scan(&name); err != nil {
+			_ = restoredRows.Close()
+			return nil, err
+		}
+		if _, ok := mainCols[name]; ok {
+			common = append(common, name)
+		}
+	}
+	if err := restoredRows.Close(); err != nil {
+		return nil, err
+	}
+	return common, nil
 }
 
 func (s *telemetryStore) restoreSQLite(ctx context.Context, path string) error {
@@ -363,6 +418,9 @@ func (s *telemetryStore) restoreSQLite(ctx context.Context, path string) error {
 		return err
 	}
 	defer connection.Close()
+	if _, err := connection.ExecContext(ctx, `PRAGMA trusted_schema = OFF`); err != nil {
+		return err
+	}
 	if _, err := connection.ExecContext(ctx, `ATTACH DATABASE ? AS restored`, path); err != nil {
 		return err
 	}
@@ -374,51 +432,62 @@ func (s *telemetryStore) restoreSQLite(ctx context.Context, path string) error {
 	defer tx.Rollback()
 	tables := []struct {
 		name     string
-		columns  string
 		optional bool
 	}{
-		{"request_logs", "id,timestamp,host,scheme,method,path,category,status,bytes_in,bytes_out,duration_ms", false},
-		{"traffic_minutes", "minute,host,requests,bytes_in,bytes_out,errors,duration_ms", false},
-		{"gateway_settings", "key,value,updated_at", false},
-		{"proxy_rules", "id,action,domain_suffix,path_prefix,enabled,created_at", false},
-		{"telegram_settings", "id,enabled,bot_token,chat_id,send_hour,last_sent_date,updated_at", false},
-		{"geo_ip_cache", "ip,country,country_code,region,latitude,longitude,looked_up", false},
-		{"client_geo_hours", "hour,ip,requests,bytes_out,peak_bps,last_seen", false},
-		{"audit_logs", "id,timestamp,username,client_ip,action,resource,detail,success", true},
+		{"request_logs", false},
+		{"traffic_minutes", false},
+		{"node_traffic_minutes", true},
+		{"node_nic_traffic_minutes", true},
+		{"node_nic_state", true},
+		{"gateway_settings", false},
+		{"proxy_rules", false},
+		{"proxy_player_rules", true},
+		{"telegram_settings", false},
+		{"turnstile_settings", true},
+		{"geo_ip_cache", false},
+		{"client_geo_hours", false},
+		{"audit_logs", true},
+		{"edge_nodes", true},
+		{"edge_domains", true},
+		{"waf_rules", true},
+		{"smart_dns_profiles", true},
+		{"watch_history", true},
 	}
 	for _, table := range tables {
-		if table.optional {
-			var count int
-			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM restored.sqlite_master WHERE type='table' AND name=?`, table.name).Scan(&count); err != nil {
-				return err
-			}
-			if count == 0 {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM restored.sqlite_master WHERE type='table' AND name=?`, table.name).Scan(&count); err != nil {
+			return err
+		}
+		if count == 0 {
+			if table.optional {
 				continue
 			}
+			return fmt.Errorf("backup is missing table %s", table.name)
 		}
+		cols, err := commonTableColumns(ctx, tx, table.name)
+		if err != nil {
+			return err
+		}
+		if len(cols) == 0 {
+			continue
+		}
+		colList := strings.Join(cols, ",")
 		if _, err := tx.ExecContext(ctx, "DELETE FROM main."+table.name); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, "INSERT INTO main."+table.name+"("+table.columns+") SELECT "+table.columns+" FROM restored."+table.name); err != nil {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO main."+table.name+"("+colList+") SELECT "+colList+" FROM restored."+table.name); err != nil {
 			return err
 		}
+	}
+	// Guarantee singleton settings rows exist even if an imported backup had empty tables.
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO main.telegram_settings(id,enabled,bot_token,chat_id,send_hour,last_sent_date,updated_at) VALUES(1,0,X'','',9,'',0)`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO main.turnstile_settings(id,enabled,site_key,secret,hostname,tested_fingerprint,verified_at,updated_at) VALUES(1,0,'',X'','','',0,0)`); err != nil {
+		return err
 	}
 	if err := restoreEmbyHealthTables(ctx, tx); err != nil {
 		return err
-	}
-	var quotaColumns int
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM pragma_table_info('proxy_rules','restored') WHERE name IN ('quota_bytes','quota_used_bytes')`,
-	).Scan(&quotaColumns); err != nil {
-		return err
-	}
-	if quotaColumns == 2 {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE main.proxy_rules SET
-			 quota_bytes=COALESCE((SELECT quota_bytes FROM restored.proxy_rules WHERE restored.proxy_rules.id=main.proxy_rules.id),0),
-			 quota_used_bytes=COALESCE((SELECT quota_used_bytes FROM restored.proxy_rules WHERE restored.proxy_rules.id=main.proxy_rules.id),0)`); err != nil {
-			return err
-		}
 	}
 	return tx.Commit()
 }
@@ -440,14 +509,43 @@ func restoreEmbyHealthTables(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM main.monitored_emby_servers`); err != nil {
 		return err
 	}
-	var lineName, note int
+	var lineName, note, probePath, serverVersion, detectedName, retryCount, retryDelay int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM restored.pragma_table_info('monitored_emby_servers') WHERE name='line_name'`).Scan(&lineName); err != nil {
 		return err
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM restored.pragma_table_info('monitored_emby_servers') WHERE name='note'`).Scan(&note); err != nil {
 		return err
 	}
-	if lineName == 1 && note == 1 {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM restored.pragma_table_info('monitored_emby_servers') WHERE name='probe_path'`).Scan(&probePath); err != nil {
+		return err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM restored.pragma_table_info('monitored_emby_servers') WHERE name='server_version'`).Scan(&serverVersion); err != nil {
+		return err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM restored.pragma_table_info('monitored_emby_servers') WHERE name='detected_name'`).Scan(&detectedName); err != nil {
+		return err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM restored.pragma_table_info('monitored_emby_servers') WHERE name='retry_count'`).Scan(&retryCount); err != nil {
+		return err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM restored.pragma_table_info('monitored_emby_servers') WHERE name='retry_delay_sec'`).Scan(&retryDelay); err != nil {
+		return err
+	}
+	if lineName == 1 && note == 1 && probePath == 1 && serverVersion == 1 && detectedName == 1 && retryCount == 1 && retryDelay == 1 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO main.monitored_emby_servers
+			(id,group_name,name,line_name,note,base_url,probe_path,server_version,detected_name,retry_count,retry_delay_sec,enabled,config_version,created_at,updated_at)
+			SELECT id,group_name,name,line_name,note,base_url,probe_path,server_version,detected_name,retry_count,retry_delay_sec,enabled,config_version,created_at,updated_at
+			FROM restored.monitored_emby_servers`); err != nil {
+			return err
+		}
+	} else if lineName == 1 && note == 1 && probePath == 1 && serverVersion == 1 && detectedName == 1 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO main.monitored_emby_servers
+			(id,group_name,name,line_name,note,base_url,probe_path,server_version,detected_name,enabled,config_version,created_at,updated_at)
+			SELECT id,group_name,name,line_name,note,base_url,probe_path,server_version,detected_name,enabled,config_version,created_at,updated_at
+			FROM restored.monitored_emby_servers`); err != nil {
+			return err
+		}
+	} else if lineName == 1 && note == 1 {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO main.monitored_emby_servers
 			(id,group_name,name,line_name,note,base_url,enabled,config_version,created_at,updated_at)
 			SELECT id,group_name,name,line_name,note,base_url,enabled,config_version,created_at,updated_at
@@ -463,11 +561,24 @@ func restoreEmbyHealthTables(ctx context.Context, tx *sql.Tx) error {
 		}
 	}
 	if checkTable == 1 {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO main.emby_health_checks
-			(id,server_id,checked_at,success,latency_ms,status_code)
-			SELECT id,server_id,checked_at,success,latency_ms,status_code
-			FROM restored.emby_health_checks`); err != nil {
+		var retriesCol int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM restored.pragma_table_info('emby_health_checks') WHERE name='retries_used'`).Scan(&retriesCol); err != nil {
 			return err
+		}
+		if retriesCol == 1 {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO main.emby_health_checks
+				(id,server_id,checked_at,success,latency_ms,status_code,retries_used)
+				SELECT id,server_id,checked_at,success,latency_ms,status_code,retries_used
+				FROM restored.emby_health_checks`); err != nil {
+				return err
+			}
+		} else {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO main.emby_health_checks
+				(id,server_id,checked_at,success,latency_ms,status_code)
+				SELECT id,server_id,checked_at,success,latency_ms,status_code
+				FROM restored.emby_health_checks`); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

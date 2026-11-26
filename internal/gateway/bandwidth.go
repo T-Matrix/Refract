@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -17,42 +18,78 @@ type bandwidthReservation struct {
 
 type bandwidthLimiter struct {
 	mu             sync.Mutex
-	bytesPerSecond int64
+	bytesPerSecond atomic.Int64
 	clients        map[string]*bandwidthReservation
 	lastCleanup    time.Time
 }
 
 func newBandwidthLimiter(bytesPerSecond int64) *bandwidthLimiter {
-	return &bandwidthLimiter{
-		bytesPerSecond: max(0, bytesPerSecond),
-		clients:        make(map[string]*bandwidthReservation),
+	limiter := &bandwidthLimiter{
+		clients: make(map[string]*bandwidthReservation),
+	}
+	limiter.bytesPerSecond.Store(max(0, bytesPerSecond))
+	return limiter
+}
+
+func (l *bandwidthLimiter) Limit() int64 {
+	if l == nil {
+		return 0
+	}
+	return l.bytesPerSecond.Load()
+}
+
+func (l *bandwidthLimiter) SetLimit(bytesPerSecond int64) {
+	if l == nil {
+		return
+	}
+	next := max(0, bytesPerSecond)
+	prev := l.bytesPerSecond.Swap(next)
+	if next == 0 || (prev > 0 && next > prev) {
+		now := time.Now()
+		l.mu.Lock()
+		for _, reservation := range l.clients {
+			reservation.mu.Lock()
+			if reservation.next.After(now) {
+				reservation.next = now
+			}
+			reservation.mu.Unlock()
+		}
+		l.mu.Unlock()
 	}
 }
 
 func (l *bandwidthLimiter) Wait(ctx context.Context, client string, size int) error {
-	if l == nil || l.bytesPerSecond <= 0 || client == "" || size <= 0 {
+	if l == nil || client == "" || size <= 0 {
 		return nil
 	}
-	reservation := l.client(client, time.Now())
-	reservation.mu.Lock()
-	defer reservation.mu.Unlock()
+	rate := l.bytesPerSecond.Load()
+	if rate <= 0 {
+		return nil
+	}
 	now := time.Now()
+	reservation := l.client(client, now)
+	reservation.mu.Lock()
+	rate = l.bytesPerSecond.Load()
+	if rate <= 0 {
+		reservation.mu.Unlock()
+		return nil
+	}
+	now = time.Now()
 	start := now
 	if reservation.next.After(start) {
 		start = reservation.next
 	}
 	delay := start.Sub(now)
+	reservation.next = start.Add(bandwidthDuration(size, rate))
+	reservation.lastSeen = now
+	reservation.mu.Unlock()
 	if delay <= 0 {
-		reservation.next = start.Add(l.duration(size))
-		reservation.lastSeen = now
 		return nil
 	}
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
 	case <-timer.C:
-		reservation.next = start.Add(l.duration(size))
-		reservation.lastSeen = time.Now()
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -60,23 +97,34 @@ func (l *bandwidthLimiter) Wait(ctx context.Context, client string, size int) er
 }
 
 func (l *bandwidthLimiter) reserve(client string, size int, now time.Time) time.Duration {
-	if l.bytesPerSecond <= 0 || client == "" || size <= 0 {
+	if l == nil || client == "" || size <= 0 {
+		return 0
+	}
+	rate := l.bytesPerSecond.Load()
+	if rate <= 0 {
 		return 0
 	}
 	reservation := l.client(client, now)
 	reservation.mu.Lock()
 	defer reservation.mu.Unlock()
+	rate = l.bytesPerSecond.Load()
+	if rate <= 0 {
+		return 0
+	}
 	start := now
 	if reservation.next.After(start) {
 		start = reservation.next
 	}
-	reservation.next = start.Add(l.duration(size))
+	reservation.next = start.Add(bandwidthDuration(size, rate))
 	reservation.lastSeen = now
 	return start.Sub(now)
 }
 
-func (l *bandwidthLimiter) duration(size int) time.Duration {
-	return time.Duration(float64(size) / float64(l.bytesPerSecond) * float64(time.Second))
+func bandwidthDuration(size int, bytesPerSecond int64) time.Duration {
+	if bytesPerSecond <= 0 {
+		return 0
+	}
+	return time.Duration(float64(size) / float64(bytesPerSecond) * float64(time.Second))
 }
 
 func (l *bandwidthLimiter) client(client string, now time.Time) *bandwidthReservation {

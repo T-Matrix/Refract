@@ -194,35 +194,49 @@ func (g *geoTracker) runLookups() {
 	if interval <= 0 {
 		interval = 1100 * time.Millisecond
 	}
-	timer := time.NewTimer(0)
-	defer timer.Stop()
+	var lastExternalLookup time.Time
 	for {
 		select {
 		case <-g.ctx.Done():
 			return
 		case ip := <-g.lookups:
-			select {
-			case <-timer.C:
-			case <-g.ctx.Done():
-				return
+			if g.isFreshCached(ip) {
+				g.clearQueued(ip)
+				continue
 			}
+			if !lastExternalLookup.IsZero() {
+				if wait := interval - time.Since(lastExternalLookup); wait > 0 {
+					timer := time.NewTimer(wait)
+					select {
+					case <-timer.C:
+					case <-g.ctx.Done():
+						timer.Stop()
+						return
+					}
+				}
+			}
+			lastExternalLookup = time.Now()
 			g.resolve(ip)
 			g.clearQueued(ip)
-			timer.Reset(interval)
 		}
 	}
 }
 
-func (g *geoTracker) resolve(ip string) {
+func (g *geoTracker) isFreshCached(ip string) bool {
 	cached, found, err := g.store.cachedGeo(g.ctx, ip)
-	if err == nil && found {
-		ttl := geoSuccessTTL
-		if cached.CountryCode == "" {
-			ttl = geoFailureTTL
-		}
-		if time.Since(time.Unix(cached.LookedUp, 0)) < ttl {
-			return
-		}
+	if err != nil || !found {
+		return false
+	}
+	ttl := geoSuccessTTL
+	if cached.CountryCode == "" {
+		ttl = geoFailureTTL
+	}
+	return time.Since(time.Unix(cached.LookedUp, 0)) < ttl
+}
+
+func (g *geoTracker) resolve(ip string) {
+	if g.isFreshCached(ip) {
+		return
 	}
 	location, err := g.lookup(g.ctx, ip)
 	if err != nil {

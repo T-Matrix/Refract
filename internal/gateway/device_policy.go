@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -12,9 +13,16 @@ type deviceIdentity struct {
 }
 
 func requestDeviceIdentity(request *http.Request) deviceIdentity {
+	return requestDeviceIdentityForTarget(request, nil)
+}
+
+func requestDeviceIdentityForTarget(request *http.Request, target *url.URL) deviceIdentity {
 	identity := deviceIdentity{}
-	for _, name := range []string{"X-Emby-Authorization", "X-MediaBrowser-Authorization", "Authorization"} {
-		parsed := parseDeviceIdentityHeader(request.Header.Get(name))
+	if request == nil {
+		return identity
+	}
+	mergeParsed := func(raw string) {
+		parsed := parseDeviceIdentityHeader(raw)
 		if identity.ID == "" {
 			identity.ID = parsed.ID
 		}
@@ -25,39 +33,111 @@ func requestDeviceIdentity(request *http.Request) deviceIdentity {
 			identity.ClientName = parsed.ClientName
 		}
 	}
+	for _, name := range []string{"X-Emby-Authorization", "X-MediaBrowser-Authorization", "Authorization"} {
+		for _, raw := range request.Header.Values(name) {
+			mergeParsed(raw)
+		}
+	}
 	if identity.ID == "" {
 		for _, name := range []string{"X-Emby-Device-Id", "X-MediaBrowser-Device-Id"} {
-			if deviceID := strings.TrimSpace(request.Header.Get(name)); deviceID != "" {
-				identity.ID = deviceID
+			for _, raw := range request.Header.Values(name) {
+				if deviceID := strings.TrimSpace(raw); deviceID != "" {
+					identity.ID = deviceID
+					break
+				}
+			}
+			if identity.ID != "" {
 				break
 			}
 		}
 	}
 	if identity.ClientName == "" {
 		for _, name := range []string{"X-Emby-Client", "X-MediaBrowser-Client"} {
-			if clientName := strings.TrimSpace(request.Header.Get(name)); clientName != "" {
-				identity.ClientName = clientName
+			for _, raw := range request.Header.Values(name) {
+				if clientName := strings.TrimSpace(raw); clientName != "" {
+					identity.ClientName = clientName
+					break
+				}
+			}
+			if identity.ClientName != "" {
 				break
 			}
 		}
 	}
 	if identity.DeviceName == "" {
 		for _, name := range []string{"X-Emby-Device-Name", "X-MediaBrowser-Device-Name"} {
-			if deviceName := strings.TrimSpace(request.Header.Get(name)); deviceName != "" {
-				identity.DeviceName = deviceName
+			for _, raw := range request.Header.Values(name) {
+				if deviceName := strings.TrimSpace(raw); deviceName != "" {
+					identity.DeviceName = deviceName
+					break
+				}
+			}
+			if identity.DeviceName != "" {
 				break
 			}
 		}
 	}
-	if identity.ID != "" || identity.ClientName != "" || identity.DeviceName != "" {
-		return identity
-	}
-	for _, key := range []string{"DeviceId", "device_id", "deviceId"} {
-		if deviceID := strings.TrimSpace(request.URL.Query().Get(key)); deviceID != "" {
-			return deviceIdentity{ID: deviceID}
+	mergeQuery := func(rawQuery string) {
+		if rawQuery == "" || (identity.ID != "" && identity.ClientName != "" && identity.DeviceName != "") {
+			return
+		}
+		parsed, err := url.ParseQuery(rawQuery)
+		if err != nil {
+			return
+		}
+		lowerVals := make(map[string]string, len(parsed))
+		for k, vals := range parsed {
+			lk := strings.ToLower(strings.TrimSpace(k))
+			if lk == "" {
+				continue
+			}
+			if _, exists := lowerVals[lk]; exists {
+				continue
+			}
+			for _, v := range vals {
+				if trimmed := strings.TrimSpace(v); trimmed != "" {
+					lowerVals[lk] = trimmed
+					break
+				}
+			}
+		}
+		for _, key := range []string{"x-emby-authorization", "x-mediabrowser-authorization"} {
+			if raw := lowerVals[key]; raw != "" {
+				mergeParsed(raw)
+			}
+		}
+		if identity.ClientName == "" {
+			for _, key := range []string{"x-emby-client", "x-mediabrowser-client", "client"} {
+				if v := lowerVals[key]; v != "" {
+					identity.ClientName = v
+					break
+				}
+			}
+		}
+		if identity.DeviceName == "" {
+			for _, key := range []string{"x-emby-device-name", "x-mediabrowser-device-name"} {
+				if v := lowerVals[key]; v != "" {
+					identity.DeviceName = v
+					break
+				}
+			}
+		}
+		if identity.ID == "" {
+			for _, key := range []string{"x-emby-device-id", "x-mediabrowser-device-id", "deviceid", "device_id"} {
+				if v := lowerVals[key]; v != "" {
+					identity.ID = v
+					break
+				}
+			}
 		}
 	}
-	return deviceIdentity{}
+	if request.URL != nil && request.URL.RawQuery != "" {
+		mergeQuery(request.URL.RawQuery)
+	}
+	if target != nil && target.RawQuery != "" {
+		mergeQuery(target.RawQuery)
+	}
+	return identity
 }
 
 func parseDeviceIdentityHeader(raw string) deviceIdentity {
@@ -75,8 +155,13 @@ func parseMediaBrowserParameters(raw string) map[string]string {
 	if raw == "" {
 		return fields
 	}
+	// Strip an optional auth scheme prefix (e.g. "MediaBrowser ", "Emby ") only when
+	// the leading token itself is NOT already a key=value parameter.
 	if space := strings.IndexAny(raw, " \t"); space >= 0 {
-		raw = raw[space+1:]
+		firstToken := raw[:space]
+		if !strings.ContainsAny(firstToken, "=,") {
+			raw = raw[space+1:]
+		}
 	}
 	for index := 0; index < len(raw); {
 		for index < len(raw) && (raw[index] == ',' || raw[index] == ' ' || raw[index] == '\t') {

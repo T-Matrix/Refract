@@ -17,6 +17,7 @@ type domainQuotaAccount struct {
 	dirty   int64
 	enforce bool
 	store   *telemetryStore
+	sink    func(ruleID, delta int64) error
 }
 
 func (a *domainQuotaAccount) Snapshot() (limit, used int64) {
@@ -76,15 +77,28 @@ func (a *domainQuotaAccount) flush() error {
 		return nil
 	}
 	delta := a.dirty
+	a.dirty = 0
+	if a.sink != nil {
+		if err := a.sink(a.ruleID, delta); err != nil {
+			a.dirty += delta
+			return err
+		}
+		return nil
+	}
+	if a.store == nil {
+		return nil
+	}
 	if err := a.store.AddProxyRuleQuotaUsage(a.ruleID, delta); err != nil {
+		a.dirty += delta
 		return err
 	}
-	a.dirty = 0
 	return nil
 }
 
 type domainQuotaManager struct {
 	store     *telemetryStore
+	sink      func(ruleID, delta int64) error
+	pendingFn func(ruleID int64) int64
 	mu        sync.Mutex
 	accounts  map[int64]*domainQuotaAccount
 	stop      chan struct{}
@@ -93,8 +107,16 @@ type domainQuotaManager struct {
 }
 
 func newDomainQuotaManager(store *telemetryStore) *domainQuotaManager {
+	return newDomainQuotaManagerWithSink(store, nil)
+}
+
+func newDomainQuotaManagerWithSink(store *telemetryStore, sink func(ruleID, delta int64) error) *domainQuotaManager {
+	return newDomainQuotaManagerWithPending(store, sink, nil)
+}
+
+func newDomainQuotaManagerWithPending(store *telemetryStore, sink func(ruleID, delta int64) error, pendingFn func(ruleID int64) int64) *domainQuotaManager {
 	manager := &domainQuotaManager{
-		store: store, accounts: make(map[int64]*domainQuotaAccount), stop: make(chan struct{}), done: make(chan struct{}),
+		store: store, sink: sink, pendingFn: pendingFn, accounts: make(map[int64]*domainQuotaAccount), stop: make(chan struct{}), done: make(chan struct{}),
 	}
 	go manager.run()
 	return manager
@@ -131,35 +153,51 @@ func (m *domainQuotaManager) Sync(policy *proxyPolicy) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, account := range m.accounts {
-		account.mu.Lock()
-		account.enforce = false
-		account.mu.Unlock()
-	}
+	activeRuleIDs := make(map[int64]struct{}, len(policy.Rules))
 	for index := range policy.Rules {
 		rule := &policy.Rules[index]
 		if rule.Action != "allow" || rule.QuotaBytes <= 0 {
-			if account := m.accounts[rule.ID]; account != nil && rule.Action == "allow" {
-				account.mu.Lock()
-				account.limit = 0
-				account.used = 0
-				account.dirty = 0
-				account.mu.Unlock()
-			}
 			continue
 		}
+		activeRuleIDs[rule.ID] = struct{}{}
 		account := m.accounts[rule.ID]
 		if account == nil {
 			account = &domainQuotaAccount{
-				ruleID: rule.ID, limit: rule.QuotaBytes, used: rule.QuotaUsedBytes, store: m.store,
+				ruleID: rule.ID, limit: rule.QuotaBytes, used: max(int64(0), rule.QuotaUsedBytes), store: m.store, sink: m.sink,
 			}
 			m.accounts[rule.ID] = account
 		}
+		pending := int64(0)
+		if m.store == nil && m.pendingFn != nil {
+			pending = m.pendingFn(rule.ID)
+		}
 		account.mu.Lock()
 		account.limit = rule.QuotaBytes
+		if m.store == nil {
+			// Authoritative sync from controller (supports resets back to 0 as well as increases)
+			// while preserving un-flushed local dirty and queued agent pending bytes.
+			account.used = max(int64(0), rule.QuotaUsedBytes+account.dirty+pending)
+		} else if rule.QuotaUsedBytes > account.used {
+			// Reflect edge-reported quota deltas persisted to DB in standalone+cluster mode.
+			account.used = max(int64(0), rule.QuotaUsedBytes)
+		}
+		if account.used < 0 {
+			account.used = 0
+		}
 		account.enforce = policy.Mode == proxyModeWhitelist && rule.Enabled
 		account.mu.Unlock()
 		rule.quota = account
+	}
+	for id, account := range m.accounts {
+		if _, keep := activeRuleIDs[id]; !keep {
+			account.mu.Lock()
+			account.limit = 0
+			account.used = 0
+			account.dirty = 0
+			account.enforce = false
+			account.mu.Unlock()
+			delete(m.accounts, id)
+		}
 	}
 }
 
@@ -183,7 +221,7 @@ func (m *domainQuotaManager) Replace(policy *proxyPolicy) {
 		}
 		account := &domainQuotaAccount{
 			ruleID: rule.ID, limit: rule.QuotaBytes, used: rule.QuotaUsedBytes,
-			enforce: policy.Mode == proxyModeWhitelist && rule.Enabled, store: m.store,
+			enforce: policy.Mode == proxyModeWhitelist && rule.Enabled, store: m.store, sink: m.sink,
 		}
 		m.accounts[rule.ID] = account
 		rule.quota = account
@@ -221,7 +259,7 @@ func (m *domainQuotaManager) flush() {
 	}
 	m.mu.Unlock()
 	for _, account := range accounts {
-		if err := account.flush(); err != nil {
+		if err := account.flush(); err != nil && m.store != nil {
 			m.store.dropped.Add(1)
 		}
 	}

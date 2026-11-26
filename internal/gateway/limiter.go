@@ -29,6 +29,31 @@ func (l *requestLimiter) Acquire(client string) bool {
 	return true
 }
 
+func (l *requestLimiter) UpdateLimits(globalMax, perIPMax int) {
+	if l == nil {
+		return
+	}
+	if globalMax < 1 {
+		globalMax = 1
+	}
+	if perIPMax < 1 || perIPMax > globalMax {
+		perIPMax = globalMax
+	}
+	l.mu.Lock()
+	l.globalMax = globalMax
+	l.perIPMax = perIPMax
+	l.mu.Unlock()
+}
+
+func (l *requestLimiter) Limits() (int, int) {
+	if l == nil {
+		return 0, 0
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.globalMax, l.perIPMax
+}
+
 func (l *requestLimiter) Release(client string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

@@ -1,6 +1,13 @@
 .git
 .github
 .env
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*-state.json
+runtime-config.json*
+backups
 *.tar.gz
 bin
 data

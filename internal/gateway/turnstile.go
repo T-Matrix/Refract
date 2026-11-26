@@ -7,8 +7,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
@@ -22,6 +24,7 @@ var turnstileSiteKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{10,128}$`)
 var (
 	errTurnstileNotTested = errors.New("Turnstile configuration must pass self-test before it can be enabled")
 	errTurnstileMissing   = errors.New("Turnstile configuration is incomplete")
+	errTurnstileStore     = errors.New("Turnstile database unavailable")
 )
 
 type turnstileConfig struct {
@@ -47,9 +50,10 @@ type turnstileManager struct {
 }
 
 type turnstileVerification struct {
-	Success  bool   `json:"success"`
-	Action   string `json:"action"`
-	Hostname string `json:"hostname"`
+	Success    bool     `json:"success"`
+	Action     string   `json:"action"`
+	Hostname   string   `json:"hostname"`
+	ErrorCodes []string `json:"error-codes"`
 }
 
 func newTurnstileManager(store *telemetryStore, secret []byte) (*turnstileManager, error) {
@@ -158,7 +162,7 @@ func (m *turnstileManager) Save(ctx context.Context, payload turnstileConfig, pl
 func (m *turnstileManager) Test(ctx context.Context, token, remoteIP string) (turnstileRecord, error) {
 	record, err := m.Config(ctx)
 	if err != nil {
-		return turnstileRecord{}, err
+		return turnstileRecord{}, fmt.Errorf("%w: %v", errTurnstileStore, err)
 	}
 	if record.SiteKey == "" || record.Hostname == "" || !record.SecretSet {
 		return turnstileRecord{}, errTurnstileMissing
@@ -172,11 +176,15 @@ func (m *turnstileManager) Test(ctx context.Context, token, remoteIP string) (tu
 	}
 	fingerprint := turnstileFingerprint(record.SiteKey, secret, record.Hostname)
 	if _, err := m.store.db.ExecContext(ctx,
-		`UPDATE turnstile_settings SET enabled=0,tested_fingerprint=?,verified_at=?,updated_at=? WHERE id=1`,
+		`UPDATE turnstile_settings SET tested_fingerprint=?,verified_at=?,updated_at=? WHERE id=1`,
 		fingerprint, time.Now().Unix(), time.Now().Unix()); err != nil {
-		return turnstileRecord{}, err
+		return turnstileRecord{}, fmt.Errorf("%w: %v", errTurnstileStore, err)
 	}
-	return m.Config(ctx)
+	updated, err := m.Config(ctx)
+	if err != nil {
+		return turnstileRecord{}, fmt.Errorf("%w: %v", errTurnstileStore, err)
+	}
+	return updated, nil
 }
 
 func (m *turnstileManager) VerifyLogin(ctx context.Context, token, remoteIP, requestHostname string) error {
@@ -202,29 +210,54 @@ func (m *turnstileManager) VerifyLogin(ctx context.Context, token, remoteIP, req
 
 func (m *turnstileManager) verify(ctx context.Context, secret, token, action, hostname, remoteIP string) error {
 	if len(token) == 0 || len(token) > 2048 {
-		return errors.New("invalid Turnstile token")
+		return errors.New("Turnstile 验证令牌无效，请刷新页面后重试")
 	}
 	form := url.Values{"secret": {secret}, "response": {token}}
-	if remoteIP != "" {
-		form.Set("remoteip", remoteIP)
+	if addr, parseErr := netip.ParseAddr(strings.TrimSpace(remoteIP)); parseErr == nil {
+		unmapped := addr.Unmap()
+		if unmapped.IsValid() && !unmapped.IsLoopback() && !unmapped.IsPrivate() && !unmapped.IsLinkLocalUnicast() && !unmapped.IsUnspecified() {
+			form.Set("remoteip", unmapped.String())
+		}
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, m.siteverifyURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return errors.New("Turnstile verification unavailable")
+		return errors.New("无法创建 Cloudflare Turnstile 验证请求")
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	response, err := m.client.Do(request)
 	if err != nil {
-		return errors.New("Turnstile verification unavailable")
+		return errors.New("主控无法连接 Cloudflare Turnstile 验证接口，请检查服务器网络")
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return errors.New("Turnstile verification unavailable")
+		return fmt.Errorf("Cloudflare Turnstile 验证接口返回 HTTP %d", response.StatusCode)
 	}
 	var result turnstileVerification
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 64<<10))
-	if err := decoder.Decode(&result); err != nil || !result.Success || result.Action != action || !strings.EqualFold(result.Hostname, hostname) {
-		return errors.New("Turnstile verification failed")
+	if err := decoder.Decode(&result); err != nil {
+		return errors.New("Cloudflare Turnstile 响应解析失败")
+	}
+	if !result.Success {
+		for _, code := range result.ErrorCodes {
+			switch code {
+			case "invalid-input-secret", "missing-input-secret":
+				return errors.New("Secret key 无效，请核对 Cloudflare Turnstile 后台的 Secret key")
+			case "timeout-or-duplicate":
+				return errors.New("验证令牌已过期或已使用，请重新完成人机验证后再试")
+			case "invalid-input-response", "missing-input-response", "bad-request":
+				return errors.New("验证令牌无效（请确认 Site key 与 Secret key 来自同一个 Turnstile 小组件）")
+			}
+		}
+		if len(result.ErrorCodes) > 0 {
+			return fmt.Errorf("Cloudflare Turnstile 校验未通过（%s）", strings.Join(result.ErrorCodes, ", "))
+		}
+		return errors.New("Cloudflare Turnstile 校验未通过")
+	}
+	if result.Action != action {
+		return errors.New("Turnstile 验证动作不匹配，请刷新页面后重新验证")
+	}
+	if !strings.EqualFold(result.Hostname, hostname) {
+		return fmt.Errorf("Turnstile 域名不匹配：Cloudflare 返回 %s，当前主控域名为 %s", result.Hostname, hostname)
 	}
 	return nil
 }

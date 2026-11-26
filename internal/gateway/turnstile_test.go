@@ -119,6 +119,31 @@ func TestTurnstileRequiresMatchingSelfTestBeforeEnable(t *testing.T) {
 	}
 }
 
+func TestTurnstileDiagnosticErrors(t *testing.T) {
+	gateway := newAdminTestGateway(t)
+	cookie := loginAdmin(t, gateway)
+	verification := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success":     false,
+			"error-codes": []string{"invalid-input-secret"},
+		})
+	}))
+	defer verification.Close()
+	gateway.turnstile.client = verification.Client()
+	gateway.turnstile.siteverifyURL = verification.URL
+
+	saved := adminRequest(t, gateway, http.MethodPut, "/_admin/api/turnstile", map[string]any{
+		"enabled": false, "site_key": "1x00000000000000000000AA", "secret": "wrong-secret",
+	}, cookie, true)
+	if saved.Code != http.StatusOK {
+		t.Fatalf("save status=%d body=%s", saved.Code, saved.Body.String())
+	}
+	tested := adminRequest(t, gateway, http.MethodPost, "/_admin/api/turnstile/test", map[string]string{"token": "tok"}, cookie, true)
+	if tested.Code != http.StatusBadGateway || !strings.Contains(tested.Body.String(), "Secret key") {
+		t.Fatalf("expected actionable Secret key diagnostic error, got status=%d body=%s", tested.Code, tested.Body.String())
+	}
+}
+
 func TestTurnstileRequestHostname(t *testing.T) {
 	for _, test := range []struct {
 		host string

@@ -31,11 +31,13 @@ type runtimeSettings struct {
 	MaxConcurrentRequests        int    `json:"max_concurrent_requests"`
 	MaxConcurrentPerIP           int    `json:"max_concurrent_per_ip"`
 	MaxDownloadMbitPerIP         int64  `json:"max_download_mbps_per_ip"`
+	UpstreamIPMode               string `json:"upstream_ip_mode,omitempty"`
 }
 
 type runtimeSettingsView struct {
 	runtimeSettings
 	PublicBaseURL  string `json:"public_base_url"`
+	HotReload      bool   `json:"hot_reload"`
 	RestartOnSave  bool   `json:"restart_on_save"`
 	RestartPending bool   `json:"restart_pending"`
 }
@@ -46,6 +48,7 @@ type runtimeConfigManager struct {
 	current runtimeSettings
 	public  string
 	restart bool
+	onApply func(Config)
 }
 
 func resolveRuntimeConfigPath(configured, databasePath string) string {
@@ -82,6 +85,7 @@ func (a *adminServer) handleRuntimeConfig(w http.ResponseWriter, r *http.Request
 		}
 		var settings runtimeSettings
 		if err := decodeAdminJSON(w, r, &settings); err != nil {
+			a.writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		view, err := a.gateway.runtime.Save(settings)
@@ -90,9 +94,10 @@ func (a *adminServer) handleRuntimeConfig(w http.ResponseWriter, r *http.Request
 			a.writeError(w, http.StatusBadRequest, "invalid runtime configuration")
 			return
 		}
-		detail := fmt.Sprintf("requested_by=%s public_proxy=%t concurrency=%d/%d download_mbps_per_ip=%d", session.Username, view.AllowUnsigned, view.MaxConcurrentRequests, view.MaxConcurrentPerIP, view.MaxDownloadMbitPerIP)
+		detail := fmt.Sprintf("requested_by=%s mode=hot_reload public_proxy=%t pass_client_ip=%t disable_cache=%t concurrency=%d/%d download_mbps_per_ip=%d", session.Username, view.AllowUnsigned, view.PassClientIP, view.DisableCache, view.MaxConcurrentRequests, view.MaxConcurrentPerIP, view.MaxDownloadMbitPerIP)
 		a.auditRequest(r, "system.configuration", "runtime", detail, true)
-		if view.RestartOnSave && a.gateway.restarting.CompareAndSwap(false, true) {
+		a.gateway.notifyClusterConfigChanged("")
+		if !view.HotReload && view.RestartOnSave && a.gateway.restarting.CompareAndSwap(false, true) {
 			view.RestartPending = true
 			a.writeJSON(w, http.StatusAccepted, view)
 			go func() {
@@ -121,7 +126,7 @@ func (m *runtimeConfigManager) View(restartPending bool) runtimeSettingsView {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return runtimeSettingsView{
-		runtimeSettings: m.current, PublicBaseURL: m.public, RestartOnSave: m.restart, RestartPending: restartPending,
+		runtimeSettings: m.current, PublicBaseURL: m.public, HotReload: m.onApply != nil, RestartOnSave: m.restart, RestartPending: restartPending,
 	}
 }
 
@@ -131,16 +136,15 @@ func (m *runtimeConfigManager) Save(settings runtimeSettings) (runtimeSettingsVi
 	if m.path == "" || !filepath.IsAbs(m.path) {
 		return runtimeSettingsView{}, errors.New("runtime configuration path is unavailable")
 	}
-	normalized, _, err := applyRuntimeSettings(Config{}, settings)
+	normalized, canonical, err := applyRuntimeSettings(Config{}, settings)
 	if err != nil {
 		return runtimeSettingsView{}, err
 	}
-	settings = runtimeSettingsFromConfig(normalized)
 	currentData, err := json.MarshalIndent(m.current, "", "  ")
 	if err != nil {
 		return runtimeSettingsView{}, err
 	}
-	nextData, err := json.MarshalIndent(settings, "", "  ")
+	nextData, err := json.MarshalIndent(canonical, "", "  ")
 	if err != nil {
 		return runtimeSettingsView{}, err
 	}
@@ -150,8 +154,11 @@ func (m *runtimeConfigManager) Save(settings runtimeSettings) (runtimeSettingsVi
 	if err := writePrivateFileAtomic(m.path, append(nextData, '\n')); err != nil {
 		return runtimeSettingsView{}, fmt.Errorf("save runtime configuration: %w", err)
 	}
-	m.current = settings
-	return runtimeSettingsView{runtimeSettings: settings, PublicBaseURL: m.public, RestartOnSave: m.restart}, nil
+	m.current = canonical
+	if m.onApply != nil {
+		m.onApply(normalized)
+	}
+	return runtimeSettingsView{runtimeSettings: canonical, PublicBaseURL: m.public, HotReload: m.onApply != nil, RestartOnSave: m.restart}, nil
 }
 
 func runtimeSettingsFromConfig(cfg Config) runtimeSettings {
@@ -176,7 +183,15 @@ func runtimeSettingsFromConfig(cfg Config) runtimeSettings {
 		MaxConcurrentRequests:        cfg.MaxConcurrent,
 		MaxConcurrentPerIP:           cfg.MaxConcurrentPerIP,
 		MaxDownloadMbitPerIP:         bytesToMegabits(cfg.MaxDownloadBPSPerIP),
+		UpstreamIPMode:               upstreamIPModeOrAuto(cfg.UpstreamIPMode),
 	}
+}
+
+func upstreamIPModeOrAuto(raw string) string {
+	if normalized, ok := normalizeUpstreamIPMode(raw); ok {
+		return normalized
+	}
+	return upstreamIPAuto
 }
 
 func applyRuntimeSettings(base Config, settings runtimeSettings) (Config, runtimeSettings, error) {
@@ -223,6 +238,10 @@ func applyRuntimeSettings(base Config, settings runtimeSettings) (Config, runtim
 	if settings.MaxDownloadMbitPerIP < 0 || settings.MaxDownloadMbitPerIP > 100000 {
 		return Config{}, runtimeSettings{}, errors.New("per-IP download limit must be between 0 and 100000 Mbps")
 	}
+	ipMode, ipModeOK := normalizeUpstreamIPMode(settings.UpstreamIPMode)
+	if !ipModeOK {
+		return Config{}, runtimeSettings{}, errors.New("upstream IP mode must be auto, ipv4_first, ipv4_only, ipv6_first, or ipv6_only")
+	}
 	base.DefaultUpstream = defaultUpstream
 	base.AllowedUpstreamsRaw = settings.AllowedUpstreams
 	base.AllowedUpstreams = patterns
@@ -236,6 +255,7 @@ func applyRuntimeSettings(base Config, settings runtimeSettings) (Config, runtim
 	base.MaxConcurrent = settings.MaxConcurrentRequests
 	base.MaxConcurrentPerIP = settings.MaxConcurrentPerIP
 	base.MaxDownloadBPSPerIP = megabitsToBytes(settings.MaxDownloadMbitPerIP)
+	base.UpstreamIPMode = ipMode
 	return base, runtimeSettingsFromConfig(base), nil
 }
 

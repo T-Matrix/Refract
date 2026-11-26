@@ -246,15 +246,150 @@ func TestEmbyHealthManualCheckRecordsProbeResult(t *testing.T) {
 	if checked.Code != http.StatusOK {
 		t.Fatalf("manual check status=%d body=%s", checked.Code, checked.Body.String())
 	}
-	if checkedPath != "/System/Info/Public" {
-		t.Fatalf("probe path=%q", checkedPath)
+	if checkedPath != "/emby/System/Info/Public" {
+		t.Fatalf("probe path=%q, want /emby/System/Info/Public", checkedPath)
 	}
 	var result embyHealthServer
 	if err := json.Unmarshal(checked.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "online" || result.LastStatusCode != http.StatusForbidden || result.LastCheckedAt == 0 {
+	if result.Status != "online" || result.LastStatusCode != http.StatusForbidden || result.LastCheckedAt == 0 || len(result.RecentChecks) != 1 {
 		t.Fatalf("unexpected manual check result: %#v", result)
+	}
+}
+
+func TestEmbyHealthSubpathFallbackVersionDetectionAndBatchAPI(t *testing.T) {
+	gw := newControllerTestGateway(t)
+	cookie := loginAdmin(t, gw)
+	gw.embyHealth.resolver = newSafeResolver(time.Minute, true)
+
+	// Server 1: subpath /emos only responds 200 on /emos/emby/System/Info/Public with Emby player UA
+	var gotUA string
+	embySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		if r.URL.Path == "/emos/emby/System/Info/Public" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ServerName":"示例服 B","Version":"4.10.2.0","Id":"abc"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer embySrv.Close()
+
+	// Server 2: Jellyfin-style server returns 404 on /emby/System/Info/Public and 200 on /System/Info/Public
+	jellySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/System/Info/Public" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"ServerName":"JellyfinBox","Version":"10.9.11"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer jellySrv.Close()
+
+	// Server 3: dead server returning 404 everywhere must be marked offline
+	deadSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer deadSrv.Close()
+
+	batchRec := adminRequest(t, gw, http.MethodPost, "/_admin/api/emby-health/batch", map[string]any{
+		"group_name": "测试分组",
+		"urls":       []string{embySrv.URL + "/emos", jellySrv.URL, deadSrv.URL, embySrv.URL + "/emos"},
+	}, cookie, true)
+	if batchRec.Code != http.StatusOK {
+		t.Fatalf("batch import status=%d body=%s", batchRec.Code, batchRec.Body.String())
+	}
+	var batchRes struct {
+		Created int                `json:"created"`
+		Skipped int                `json:"skipped"`
+		Servers []embyHealthServer `json:"servers"`
+	}
+	if err := json.Unmarshal(batchRec.Body.Bytes(), &batchRes); err != nil {
+		t.Fatal(err)
+	}
+	if batchRes.Created != 3 || batchRes.Skipped != 1 {
+		t.Fatalf("batch created=%d skipped=%d, want 3/1", batchRes.Created, batchRes.Skipped)
+	}
+
+	checkAll := adminRequest(t, gw, http.MethodPost, "/_admin/api/emby-health/check-all", map[string]any{}, cookie, true)
+	if checkAll.Code != http.StatusOK {
+		t.Fatalf("check-all status=%d body=%s", checkAll.Code, checkAll.Body.String())
+	}
+	var list []embyHealthServer
+	if err := json.Unmarshal(checkAll.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if gotUA != embyHealthUserAgent {
+		t.Fatalf("expected Emby player UA %q, got %q", embyHealthUserAgent, gotUA)
+	}
+	byURL := map[string]embyHealthServer{}
+	for _, s := range list {
+		byURL[s.BaseURL] = s
+	}
+	sEmby := byURL[embySrv.URL+"/emos"]
+	if sEmby.Status != "online" || sEmby.DetectedName != "示例服 B" || sEmby.ServerVersion != "4.10.2.0" || len(sEmby.RecentChecks) == 0 {
+		t.Fatalf("unexpected subpath Emby result: %#v", sEmby)
+	}
+	sJelly := byURL[jellySrv.URL]
+	if sJelly.Status != "online" || sJelly.DetectedName != "JellyfinBox" || sJelly.ServerVersion != "10.9.11" {
+		t.Fatalf("unexpected Jellyfin fallback result: %#v", sJelly)
+	}
+	sDead := byURL[deadSrv.URL]
+	if sDead.Status != "offline" || sDead.LastStatusCode != http.StatusNotFound {
+		t.Fatalf("404-everywhere server should be offline, got: %#v", sDead)
+	}
+}
+
+func TestEmbyHealthRetryRecoversTransientFailureAndSettingsAPI(t *testing.T) {
+	gw := newControllerTestGateway(t)
+	cookie := loginAdmin(t, gw)
+	gw.embyHealth.resolver = newSafeResolver(time.Minute, true)
+
+	// Verify GET/PUT settings API + apply_to_all
+	var attempts int
+	flakySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts <= 2 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ServerName":"FlakyOK","Version":"4.9.0"}`))
+	}))
+	defer flakySrv.Close()
+
+	// Test direct retry helper with short 5ms delay: 2 failures then 200 -> recovers cleanly!
+	sample := gw.embyHealth.probeWithRetry(context.Background(), flakySrv.URL, "", 2, 5*time.Millisecond, 2*time.Second)
+	if !sample.Success || sample.StatusCode != http.StatusOK || sample.DetectedName != "FlakyOK" || attempts != 3 {
+		t.Fatalf("expected retry recovery on attempt 3, got sample=%#v attempts=%d", sample, attempts)
+	}
+
+	// Create server and update global settings with apply_to_all=true
+	createRec := adminRequest(t, gw, http.MethodPost, "/_admin/api/emby-health", map[string]any{
+		"group_name":      "测试",
+		"name":            "节点",
+		"base_url":        flakySrv.URL,
+		"retry_count":     1,
+		"retry_delay_sec": 1,
+		"enabled":         true,
+	}, cookie, true)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", createRec.Code, createRec.Body.String())
+	}
+
+	putSettings := adminRequest(t, gw, http.MethodPut, "/_admin/api/emby-health/settings", map[string]any{
+		"default_retry_count":     3,
+		"default_retry_delay_sec": 4,
+		"probe_timeout_sec":       10,
+		"apply_to_all":            true,
+	}, cookie, true)
+	if putSettings.Code != http.StatusOK {
+		t.Fatalf("put settings status=%d body=%s", putSettings.Code, putSettings.Body.String())
+	}
+	listRec := adminRequest(t, gw, http.MethodGet, "/_admin/api/emby-health", nil, cookie, false)
+	if !strings.Contains(listRec.Body.String(), `"retry_count":3`) || !strings.Contains(listRec.Body.String(), `"retry_delay_sec":4`) {
+		t.Fatalf("expected apply_to_all updated server retry fields, got %s", listRec.Body.String())
 	}
 }
 

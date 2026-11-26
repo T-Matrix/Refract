@@ -10,8 +10,8 @@ import (
 const auditLogTTL = 90 * 24 * time.Hour
 
 var (
-	auditTelegramTokenPattern = regexp.MustCompile(`\b[0-9]{6,12}:[A-Za-z0-9_-]{20,}\b`)
-	auditSecretPattern        = regexp.MustCompile(`(?i)\b(password|passwd|token|api[_-]?key|authorization|secret)\s*[:=]\s*[^\s,;]+`)
+	auditTelegramTokenPattern = regexp.MustCompile(`(?i)(?:bot)?[0-9]{6,15}:[A-Za-z0-9_-]{20,}`)
+	auditSecretPattern        = regexp.MustCompile(`(?i)\b(password|passwd|token|api[_-]?key|authorization|secret)\s*[:=]\s*(?:(?:bearer|basic)\s+)?[^\s,;]+`)
 	auditQueryPattern         = regexp.MustCompile(`(?i)(https?://[^\s?]+|/[^\s?]*)\?[^\s]*`)
 )
 

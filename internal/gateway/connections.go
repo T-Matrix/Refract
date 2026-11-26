@@ -25,6 +25,9 @@ type connectionFlow struct {
 	deviceID      string
 	deviceName    string
 	clientName    string
+	mediaMu       sync.RWMutex
+	mediaTitle    string
+	mediaSubtitle string
 	cancel        context.CancelFunc
 	uploadTotal   atomic.Int64
 	downloadTotal atomic.Int64
@@ -34,8 +37,30 @@ type connectionFlow struct {
 	lastDownload  int64
 }
 
+func (f *connectionFlow) SetMediaInfo(title, subtitle string) {
+	if f == nil {
+		return
+	}
+	f.mediaMu.Lock()
+	f.mediaTitle = title
+	f.mediaSubtitle = subtitle
+	f.mediaMu.Unlock()
+}
+
+func (f *connectionFlow) MediaInfo() (string, string) {
+	if f == nil {
+		return "", ""
+	}
+	f.mediaMu.RLock()
+	t, s := f.mediaTitle, f.mediaSubtitle
+	f.mediaMu.RUnlock()
+	return t, s
+}
+
 type connectionSnapshot struct {
 	ID            string `json:"id"`
+	NodeID        string `json:"node_id,omitempty"`
+	NodeName      string `json:"node_name,omitempty"`
 	StartedAt     int64  `json:"started_at"`
 	DurationMS    int64  `json:"duration_ms"`
 	ClientIP      string `json:"client_ip"`
@@ -47,6 +72,8 @@ type connectionSnapshot struct {
 	Category      string `json:"category"`
 	UserAgent     string `json:"user_agent"`
 	ClientName    string `json:"client_name"`
+	MediaTitle    string `json:"media_title,omitempty"`
+	MediaSubtitle string `json:"media_subtitle,omitempty"`
 	UploadBPS     int64  `json:"upload_bps"`
 	DownloadBPS   int64  `json:"download_bps"`
 	UploadTotal   int64  `json:"upload_total"`
@@ -185,6 +212,39 @@ func (t *connectionTracker) Cancel(id string) bool {
 	return true
 }
 
+func (t *connectionTracker) CancelMatchingStream(clientIP, upstreamHost string, itemIDs ...string) int {
+	if t == nil || clientIP == "" || upstreamHost == "" || len(itemIDs) == 0 {
+		return 0
+	}
+	wantIDs := make(map[string]struct{}, len(itemIDs))
+	for _, id := range itemIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			wantIDs[id] = struct{}{}
+		}
+	}
+	if len(wantIDs) == 0 {
+		return 0
+	}
+	normIP := normalizeTelemetryClientIP(clientIP)
+	t.mu.RLock()
+	cancels := make([]context.CancelFunc, 0, 4)
+	for _, flow := range t.items {
+		if normalizeTelemetryClientIP(flow.clientIP) != normIP || !strings.EqualFold(flow.host, upstreamHost) {
+			continue
+		}
+		if extractedID, isStream, _ := extractEmbyItemIDFromPath(flow.path); isStream {
+			if _, match := wantIDs[extractedID]; match && flow.cancel != nil {
+				cancels = append(cancels, flow.cancel)
+			}
+		}
+	}
+	t.mu.RUnlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+	return len(cancels)
+}
+
 func (t *connectionTracker) CancelAll() int {
 	if t == nil {
 		return 0
@@ -209,10 +269,12 @@ func (t *connectionTracker) Snapshot() []connectionSnapshot {
 	t.mu.RLock()
 	result := make([]connectionSnapshot, 0, len(t.items))
 	for _, item := range t.items {
+		mediaTitle, mediaSubtitle := item.MediaInfo()
 		result = append(result, connectionSnapshot{
 			ID: item.id, StartedAt: item.started.Unix(), DurationMS: now.Sub(item.started).Milliseconds(),
 			ClientIP: item.clientIP, Method: item.method, Host: item.host, Domain: item.domain,
 			Path: item.path, Category: item.category, UserAgent: item.userAgent, ClientName: item.clientName,
+			MediaTitle: mediaTitle, MediaSubtitle: mediaSubtitle,
 			UploadBPS: item.uploadRate.Load(), DownloadBPS: item.downloadRate.Load(),
 			UploadTotal: item.uploadTotal.Load(), DownloadTotal: item.downloadTotal.Load(),
 		})

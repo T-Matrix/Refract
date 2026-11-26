@@ -9,12 +9,85 @@ import (
 	"time"
 )
 
+func (a *adminServer) handlePlaybacks(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		a.methodNotAllowed(w, http.MethodGet)
+		return
+	}
+	nodeID := strings.TrimSpace(r.URL.Query().Get("node_id"))
+	limit := 50
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 200 {
+			limit = parsed
+		}
+	}
+	var localActive []playbackSessionSnapshot
+	if a.gateway.playback != nil {
+		localActive = a.gateway.playback.Snapshot()
+	}
+	var active []playbackSessionSnapshot
+	if a.gateway.cluster != nil {
+		active = a.gateway.cluster.AggregatePlaybacks(r.Context(), localActive, nodeID)
+	} else {
+		active = localActive
+	}
+	history, count24h, err := a.store.ListWatchHistory(r.Context(), nodeID, limit)
+	if err != nil {
+		a.writeError(w, http.StatusInternalServerError, "playback history unavailable")
+		return
+	}
+	a.store.EnrichPlaybackLocations(r.Context(), active, history)
+	if a.store != nil {
+		if servers, healthErr := a.store.EmbyHealthTargetLabels(r.Context()); healthErr == nil && len(servers) > 0 {
+			labels := buildEmbyHealthLabels(servers)
+			for i := range active {
+				if lbl := matchEmbyHealthLabel(active[i].UpstreamHost, "", labels); lbl != nil {
+					active[i].EmbyServerName = lbl.serverName
+				}
+			}
+			for i := range history {
+				if lbl := matchEmbyHealthLabel(history[i].UpstreamHost, "", labels); lbl != nil {
+					history[i].EmbyServerName = lbl.serverName
+				}
+			}
+		}
+	}
+	uniqueViewers := make(map[string]struct{}, len(active))
+	var totalDown int64
+	for _, s := range active {
+		totalDown += s.DownloadBPS
+		who := strings.TrimSpace(s.UserName)
+		if who == "" {
+			who = s.ClientIP + "|" + s.DeviceID
+		}
+		uniqueViewers[who] = struct{}{}
+	}
+	a.writeJSON(w, http.StatusOK, map[string]any{
+		"summary": playbackSummary{
+			WatchingCount:    len(active),
+			UniqueUsers:      len(uniqueViewers),
+			TotalDownloadBPS: totalDown,
+			History24h:       count24h,
+		},
+		"active":     active,
+		"history":    history,
+		"updated_at": time.Now().Unix(),
+	})
+}
+
 func (a *adminServer) handleConnections(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		a.methodNotAllowed(w, http.MethodGet)
 		return
 	}
-	items := a.gateway.connections.Snapshot()
+	nodeID := strings.TrimSpace(r.URL.Query().Get("node_id"))
+	localItems := a.gateway.connections.Snapshot()
+	var items []connectionSnapshot
+	if a.gateway.cluster != nil {
+		items = a.gateway.cluster.AggregateConnections(r.Context(), localItems, nodeID)
+	} else {
+		items = localItems
+	}
 	if err := a.store.EnrichConnectionLocations(r.Context(), items); err != nil {
 		a.writeError(w, http.StatusInternalServerError, "live connections unavailable")
 		return
@@ -36,12 +109,68 @@ func (a *adminServer) handleConnectionCancel(w http.ResponseWriter, r *http.Requ
 		a.writeError(w, http.StatusBadRequest, "invalid connection id")
 		return
 	}
-	if !a.gateway.connections.Cancel(id) {
-		a.writeError(w, http.StatusNotFound, "connection not found")
+	nodeID := strings.TrimSpace(r.URL.Query().Get("node_id"))
+	if nodeID != "" && nodeID != "local" && a.gateway.cluster != nil {
+		if !a.gateway.cluster.CancelRemoteConnection(nodeID, id) {
+			a.writeError(w, http.StatusNotFound, "connection not found")
+			return
+		}
+		a.auditRequest(r, "connection.terminate", id, "node_id="+nodeID, true)
+		a.writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 		return
 	}
-	a.auditRequest(r, "connection.terminate", id, "", true)
-	a.writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	if a.gateway.connections.Cancel(id) {
+		a.auditRequest(r, "connection.terminate", id, "", true)
+		a.writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+		return
+	}
+	if a.gateway.cluster != nil {
+		if remoteNode, ok := a.gateway.cluster.CancelRemoteFlowByID(id); ok {
+			a.auditRequest(r, "connection.terminate", id, "node_id="+remoteNode, true)
+			a.writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+			return
+		}
+	}
+	a.writeError(w, http.StatusNotFound, "connection not found")
+}
+
+func (a *adminServer) handlePlaybackTerminate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		a.methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if !sameOriginRequest(r) {
+		a.writeError(w, http.StatusForbidden, "same-origin request required")
+		return
+	}
+	var req struct {
+		SessionKey string `json:"session_key"`
+		NodeID     string `json:"node_id"`
+		FlowID     string `json:"flow_id"`
+	}
+	if err := decodeAdminJSON(w, r, &req); err != nil {
+		a.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	sessionKey := strings.TrimSpace(req.SessionKey)
+	nodeID := strings.TrimSpace(req.NodeID)
+	flowID := strings.TrimSpace(req.FlowID)
+	if sessionKey == "" && flowID == "" {
+		a.writeError(w, http.StatusBadRequest, "session_key or flow_id is required")
+		return
+	}
+	if nodeID != "" && nodeID != "local" && a.gateway.cluster != nil {
+		if !a.gateway.cluster.CancelRemotePlayback(nodeID, sessionKey, flowID) {
+			a.writeError(w, http.StatusNotFound, "playback session not found")
+			return
+		}
+		a.auditRequest(r, "playback.terminate", sessionKey, "node_id="+nodeID, true)
+		a.writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cooldown_sec": int(playbackKickBlockTTL / time.Second)})
+		return
+	}
+	a.gateway.terminatePlaybackSession(sessionKey, flowID)
+	a.auditRequest(r, "playback.terminate", sessionKey, "local", true)
+	a.writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cooldown_sec": int(playbackKickBlockTTL / time.Second)})
 }
 
 func (a *adminServer) handleReports(w http.ResponseWriter, r *http.Request) {
@@ -59,8 +188,10 @@ func (a *adminServer) handleReports(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, http.StatusInternalServerError, "report unavailable")
 		return
 	}
-	if servers, healthErr := a.store.EmbyHealthTargetLabels(r.Context()); healthErr == nil {
-		decorateTargetSummaries(report.TopTargets, servers)
+	if a.gateway.cfg.Role == RoleStandalone {
+		if servers, healthErr := a.store.EmbyHealthTargetLabels(r.Context()); healthErr == nil {
+			decorateTargetSummaries(report.TopTargets, servers)
+		}
 	}
 	a.writeJSON(w, http.StatusOK, report)
 }
@@ -202,6 +333,9 @@ func (a *adminServer) handleBackupImport(w http.ResponseWriter, r *http.Request)
 		a.writeError(w, http.StatusBadRequest, "invalid backup upload")
 		return
 	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
 	file, _, err := r.FormFile("backup")
 	if err != nil {
 		a.writeError(w, http.StatusBadRequest, "backup file is required")
@@ -252,7 +386,7 @@ func (a *adminServer) handleBackupItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		safety, err := a.gateway.backups.Restore(r.Context(), name)
-		if err != nil || a.gateway.reloadProxyPolicy(r.Context()) != nil {
+		if err != nil || a.gateway.reloadProxyPolicyReplacingQuota(r.Context()) != nil {
 			detail := "restore failed"
 			if err != nil {
 				detail = err.Error()
@@ -261,8 +395,22 @@ func (a *adminServer) handleBackupItem(w http.ResponseWriter, r *http.Request) {
 			a.writeError(w, http.StatusInternalServerError, "backup restore failed")
 			return
 		}
+		a.gateway.publicPortal.Store(a.store.LoadPublicPortalEnabled(r.Context()))
+		a.gateway.reloadWAFRules(r.Context())
+		invalidateBrandAvatarCache(a.store)
+		if a.gateway.cloudflare != nil {
+			a.gateway.cloudflare.clearSyncCache()
+		}
+		if a.gateway.axisnow != nil {
+			a.gateway.axisnow.clearSyncCache()
+		}
 		a.gateway.connections.CancelAll()
-		a.gateway.quota.Replace(a.gateway.policy.Load())
+		if a.gateway.cluster != nil {
+			a.gateway.cluster.CancelAllRemoteConnections()
+		}
+		if a.gateway.embyHealth != nil {
+			a.gateway.embyHealth.Wake()
+		}
 		a.gateway.telegram.Wake()
 		a.gateway.backups.Wake()
 		a.auditRequest(r, "backup.restore", name, "safety="+safety.Name, true)
@@ -292,14 +440,19 @@ func (a *adminServer) handleBackupItem(w http.ResponseWriter, r *http.Request) {
 func (a *adminServer) auditRequest(r *http.Request, action, resource, detail string, success bool) {
 	session, _ := a.authenticate(r)
 	a.store.RecordAudit(r.Context(), auditEntry{
-		Username: session.Username, ClientIP: adminClientIP(r, a.trustProxy), Action: action,
+		Username: session.Username, ClientIP: adminClientIP(r, a.trustProxy, a.trustedProxyCIDRs...), Action: action,
 		Resource: resource, Detail: detail, Success: success,
 	})
 }
 
 func safeCSVCell(value string) string {
 	value = strings.ReplaceAll(value, "\x00", "")
-	if value != "" && strings.ContainsRune("=+-@", rune(value[0])) {
+	if value == "" {
+		return value
+	}
+	first := rune(value[0])
+	trimmed := strings.TrimLeft(value, " \t\r\n")
+	if strings.ContainsRune("=+-@\t\r\n", first) || (trimmed != "" && strings.ContainsRune("=+-@", rune(trimmed[0]))) {
 		return "'" + value
 	}
 	return value

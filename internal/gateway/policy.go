@@ -46,24 +46,26 @@ type playerPolicy struct {
 }
 
 type proxyPolicy struct {
-	Mode            string       `json:"mode"`
-	Rules           []proxyRule  `json:"rules"`
-	PlayerPolicy    playerPolicy `json:"player_policy"`
-	ScheduleEnabled bool         `json:"schedule_enabled"`
-	ScheduleStart   string       `json:"schedule_start"`
-	ScheduleEnd     string       `json:"schedule_end"`
+	Mode            string             `json:"mode"`
+	Rules           []proxyRule        `json:"rules"`
+	PlayerPolicy    playerPolicy       `json:"player_policy"`
+	ClientAccess    clientAccessPolicy `json:"client_access"`
+	ScheduleEnabled bool               `json:"schedule_enabled"`
+	ScheduleStart   string             `json:"schedule_start"`
+	ScheduleEnd     string             `json:"schedule_end"`
 }
 
 type proxyPolicyJSON struct {
-	Mode                   string       `json:"mode"`
-	Rules                  []proxyRule  `json:"rules"`
-	PlayerPolicy           playerPolicy `json:"player_policy"`
-	ScheduleEnabled        bool         `json:"schedule_enabled"`
-	ScheduleStart          string       `json:"schedule_start"`
-	ScheduleEnd            string       `json:"schedule_end"`
-	ScheduleOpen           bool         `json:"schedule_open"`
-	ScheduleTimezone       string       `json:"schedule_timezone"`
-	ScheduleNextTransition int64        `json:"schedule_next_transition"`
+	Mode                   string             `json:"mode"`
+	Rules                  []proxyRule        `json:"rules"`
+	PlayerPolicy           playerPolicy       `json:"player_policy"`
+	ClientAccess           clientAccessPolicy `json:"client_access"`
+	ScheduleEnabled        bool               `json:"schedule_enabled"`
+	ScheduleStart          string             `json:"schedule_start"`
+	ScheduleEnd            string             `json:"schedule_end"`
+	ScheduleOpen           bool               `json:"schedule_open"`
+	ScheduleTimezone       string             `json:"schedule_timezone"`
+	ScheduleNextTransition int64              `json:"schedule_next_transition"`
 }
 
 func (p *proxyPolicy) MarshalJSON() ([]byte, error) {
@@ -83,9 +85,14 @@ func (p *proxyPolicy) MarshalJSON() ([]byte, error) {
 		}
 		rules[index].quota = nil
 	}
+	clientAccess := p.ClientAccess
+	if clientAccess.IPMode == "" {
+		clientAccess = defaultClientAccessPolicy()
+	}
 	return json.Marshal(proxyPolicyJSON{
 		Mode: p.Mode, Rules: rules,
 		PlayerPolicy:    p.PlayerPolicy,
+		ClientAccess:    clientAccess,
 		ScheduleEnabled: p.ScheduleEnabled, ScheduleStart: p.ScheduleStart, ScheduleEnd: p.ScheduleEnd,
 		ScheduleOpen: open, ScheduleTimezone: applicationTimezone, ScheduleNextTransition: nextUnix,
 	})
@@ -100,6 +107,20 @@ func (g *Gateway) reloadProxyPolicy(ctx context.Context) error {
 		g.quota.Sync(policy)
 	}
 	g.policy.Store(policy)
+	g.notifyClusterConfigChanged("")
+	return nil
+}
+
+func (g *Gateway) reloadProxyPolicyReplacingQuota(ctx context.Context) error {
+	policy, err := g.telemetry.LoadProxyPolicy(ctx)
+	if err != nil {
+		return err
+	}
+	if g.quota != nil {
+		g.quota.Replace(policy)
+	}
+	g.policy.Store(policy)
+	g.notifyClusterConfigChanged("")
 	return nil
 }
 
@@ -308,6 +329,7 @@ func (s *telemetryStore) LoadProxyPolicy(ctx context.Context) (*proxyPolicy, err
 	policy := &proxyPolicy{
 		Mode: proxyModeOff, Rules: []proxyRule{},
 		PlayerPolicy:  playerPolicy{Mode: proxyModeOff, Rules: []playerRule{}},
+		ClientAccess:  defaultClientAccessPolicy(),
 		ScheduleStart: "09:00", ScheduleEnd: "23:00",
 	}
 	var storedMode string
@@ -408,6 +430,7 @@ func (s *telemetryStore) LoadProxyPolicy(ctx context.Context) (*proxyPolicy, err
 		policy.ScheduleStart = start
 		policy.ScheduleEnd = end
 	}
+	policy.ClientAccess = s.LoadClientAccessPolicy(ctx)
 	return policy, nil
 }
 

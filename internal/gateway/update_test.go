@@ -28,6 +28,11 @@ func TestCompareVersions(t *testing.T) {
 		{"v1.8.0", "1.8.0", 0},
 		{"1.8.0", "1.8.1", -1},
 		{"2.0.0", "1.99.99", 1},
+		{"2.0.0", "2.0.0-beta.1", 1},
+		{"2.0.0-beta.2", "2.0.0-beta.1", 1},
+		{"2.0.0-beta.10", "2.0.0-beta.2", 1},
+		{"2.0.0-rc.1", "2.0.0-beta.9", 1},
+		{"v2.0.0-beta.1", "1.18.0", 1},
 		{"invalid", "1.0.0", 0},
 	}
 	for _, test := range tests {
@@ -120,6 +125,23 @@ func TestReleaseNotesReadsOnlyRunningVersion(t *testing.T) {
 	if _, err := manager.ReleaseNotes(context.Background(), "1.8.1"); err == nil {
 		t.Fatal("release notes accepted a version other than the running version")
 	}
+
+	Version = "2.0.0-beta.1"
+	preSrv := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/tags/v2.0.0-beta.1" {
+			http.NotFound(writer, request)
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(latestRelease{
+			TagName: "v2.0.0-beta.1", Name: "Refract v2.0.0-beta.1", Prerelease: true, Body: "## Beta", PublishedAt: "2026-11-26T12:00:00Z",
+		})
+	}))
+	defer preSrv.Close()
+	preMgr := &updateManager{client: preSrv.Client(), tagAPIURL: preSrv.URL + "/tags"}
+	preNotes, err := preMgr.ReleaseNotes(context.Background(), "2.0.0-beta.1")
+	if err != nil || preNotes.Version != "2.0.0-beta.1" || !strings.Contains(preNotes.Notes, "## Beta") {
+		t.Fatalf("expected prerelease release notes, got %#v err=%v", preNotes, err)
+	}
 }
 
 func TestReleaseNotesFallBackWhenGitHubIsUnavailable(t *testing.T) {
@@ -196,7 +218,7 @@ func TestUpdateAPIRequiresAuthenticationAndSameOrigin(t *testing.T) {
 	gateway := newAdminTestGateway(t)
 	cookie := loginAdmin(t, gateway)
 	parts := versionPattern.FindStringSubmatch(Version)
-	if len(parts) != 4 {
+	if len(parts) < 4 {
 		t.Fatalf("invalid current version %q", Version)
 	}
 	patch, err := strconv.Atoi(parts[3])
